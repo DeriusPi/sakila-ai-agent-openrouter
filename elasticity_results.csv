@@ -1,0 +1,17 @@
+category,price_elasticity,std_error,z_value,p_value,ci_low_95,ci_high_95,sample_size,interpretation
+Sci-Fi,-0.0623,0.0291,-2.1381,0.0325,-0.1194,-0.0052,59,Inelastic
+Children,-0.0419,0.0341,-1.2295,0.2189,-0.1086,0.0249,58,Not significant
+Games,-0.038,0.0292,-1.303,0.1926,-0.0952,0.0192,58,Not significant
+Family,-0.0347,0.0293,-1.1859,0.2356,-0.0921,0.0227,67,Not significant
+Documentary,-0.0285,0.0247,-1.1554,0.2479,-0.0769,0.0199,63,Not significant
+Horror,-0.0256,0.0373,-0.6876,0.4917,-0.0987,0.0474,53,Not significant
+Foreign,-0.0241,0.0316,-0.7638,0.445,-0.086,0.0378,67,Not significant
+Classics,-0.0166,0.0292,-0.5687,0.5695,-0.0738,0.0406,54,Not significant
+Comedy,-0.0096,0.0387,-0.2489,0.8034,-0.0855,0.0662,56,Not significant
+Travel,0.0055,0.0342,0.1613,0.8718,-0.0615,0.0725,53,Not significant
+Drama,0.0082,0.0248,0.3321,0.7398,-0.0404,0.0568,61,Not significant
+Animation,0.0089,0.0238,0.3743,0.7082,-0.0378,0.0557,64,Not significant
+Music,0.0092,0.0353,0.2609,0.7942,-0.0599,0.0783,51,Not significant
+New,0.0141,0.0316,0.4478,0.6543,-0.0478,0.076,60,Not significant
+Sports,0.0194,0.0249,0.7781,0.4365,-0.0295,0.0683,73,Not significant
+Action,0.0326,0.0292,1.1168,0.2641,-0.0246,0.0899,61,Not significant
