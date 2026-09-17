@@ -1,12 +1,12 @@
 # ============================================================
 # SAKILA AI AGENT
-# Claude + Tool Layer
+# Claude + Tool Layer + BI Presentation Layer
 # ============================================================
 
 import os
 import json
+import re
 import anthropic
-
 from dotenv import load_dotenv
 
 from tools.tool_definitions import (
@@ -24,8 +24,7 @@ load_dotenv()
 API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 if not API_KEY:
-    print("ERROR: ANTHROPIC_API_KEY not found.")
-    exit()
+    raise RuntimeError("ANTHROPIC_API_KEY not found.")
 
 client = anthropic.Anthropic(
     api_key=API_KEY
@@ -35,63 +34,712 @@ MODEL = "claude-sonnet-4-5"
 
 
 # ============================================================
-# 2. SYSTEM PROMPT
+# 2. MODE DETECTION
 # ============================================================
 
-SYSTEM_PROMPT = """
-You are Sakila AI Analyst.
+def detect_mode(user_question):
+    """
+    Automatically determine the main task type.
 
-You are an AI pricing and elasticity analyst
-working with Sakila rental data.
+    ANALYSIS:
+        User wants to understand existing data.
 
-Your job is to answer questions about:
+    OPTIMIZATION:
+        User wants a policy / decision / recommendation.
 
-- price elasticity
-- category performance
-- statistical significance
-- demand
-- revenue
-- price changes
-- pricing recommendations
+    BOTH:
+        User wants analysis followed by optimization.
+    """
 
-You have access to multiple analytical tools.
+    q = user_question.lower().strip()
 
-IMPORTANT RULES:
+    optimization_keywords = [
+        "recommend",
+        "recommendation",
+        "best policy",
+        "optimal",
+        "optimize",
+        "optimization",
+        "should we",
+        "what policy",
+        "which policy",
+        "what fee should",
+        "what price should",
+        "nên chọn",
+        "nên áp dụng",
+        "nên đặt",
+        "nên để",
+        "nên dùng",
+        "tối ưu",
+        "tối ưu hóa",
+        "đề xuất",
+        "khuyến nghị",
+        "chính sách nào",
+        "mức phí nào",
+        "giá nào",
+        "nên tăng",
+        "nên giảm"
+    ]
 
-1. Use tools when the user's question requires
-   actual elasticity or business data.
+    simulation_keywords = [
+        "simulate",
+        "simulation",
+        "scenario",
+        "what happens if",
+        "what if",
+        "impact of",
+        "change the fee",
+        "change fee",
+        "thay đổi phí",
+        "nếu tăng phí",
+        "nếu giảm phí",
+        "nếu phí",
+        "mô phỏng",
+        "kịch bản"
+    ]
 
-2. Do not invent numerical results.
+    analysis_keywords = [
+        "analyze",
+        "analysis",
+        "why",
+        "which",
+        "what is",
+        "how much",
+        "how many",
+        "percentage",
+        "average",
+        "revenue",
+        "late fee",
+        "late return",
+        "category",
+        "compare",
+        "phân tích",
+        "tại sao",
+        "bao nhiêu",
+        "chiếm bao nhiêu",
+        "trung bình",
+        "doanh thu",
+        "phí trễ",
+        "trả trễ",
+        "danh mục",
+        "so sánh",
+        "thống kê"
+    ]
 
-3. Use multiple tools when necessary.
+    has_optimization = any(
+        keyword in q
+        for keyword in optimization_keywords
+    )
 
-4. If a tool result is insufficient, call another
-   appropriate tool.
+    has_simulation = any(
+        keyword in q
+        for keyword in simulation_keywords
+    )
 
-5. Consider statistical significance before making
-   pricing recommendations.
+    has_analysis = any(
+        keyword in q
+        for keyword in analysis_keywords
+    )
 
-6. Explain the reasoning behind recommendations.
+    if has_optimization and (
+        has_analysis
+        or has_simulation
+    ):
+        return "BOTH"
 
-7. Answer in Vietnamese unless the user asks
-   for another language.
+    if has_optimization:
+        return "OPTIMIZATION"
 
-8. Keep answers clear and business-oriented.
+    return "ANALYSIS"
+
+
+# ============================================================
+# 3. MODE INSTRUCTIONS
+# ============================================================
+
+def build_mode_instruction(mode):
+    """
+    Add task-specific instructions without removing
+    the main BI agent behavior.
+    """
+
+    if mode == "OPTIMIZATION":
+        return """
+
+============================================================
+CURRENT MODE: OPTIMIZATION
+============================================================
+
+The user is asking for a decision, policy, fee, price,
+duration, or recommendation.
+
+Follow this pipeline:
+
+1. Obtain the required actual data.
+2. Generate predictions if necessary.
+3. Simulate relevant scenarios.
+4. Apply business constraints.
+5. Compare feasible scenarios.
+6. Use the optimization result.
+7. Explain why the selected result is produced by
+   the optimization pipeline.
+
+IMPORTANT:
+
+- Do not invent a policy.
+- Do not manually choose a policy outside the optimization
+  result.
+- Do not replace the optimization objective with your own.
+- Use the actual feasible scenarios returned by the tools.
+- Clearly distinguish simulated / expected values from
+  observed historical values.
+
+For the final answer:
+
+- Explain the analysis briefly.
+- Explain the optimization result.
+- State the recommendation only when it is explicitly
+  supported by the optimization tool.
+
+"""
+
+    if mode == "BOTH":
+        return """
+
+============================================================
+CURRENT MODE: ANALYSIS + OPTIMIZATION
+============================================================
+
+The user needs both business analysis and a decision.
+
+First:
+
+1. Analyze the current Sakila data.
+2. Identify the relevant business drivers.
+3. Obtain predictions if necessary.
+4. Simulate policy scenarios.
+5. Apply constraints.
+6. Compare feasible scenarios.
+7. Use the optimization pipeline.
+8. Explain the resulting recommendation.
+
+Do not skip the analysis section.
+
+The final BI response should clearly distinguish:
+
+- observed historical facts
+- analytical interpretation
+- simulated outcomes
+- optimization recommendation
+
+Never invent numerical results.
+
+"""
+
+    return """
+
+============================================================
+CURRENT MODE: ANALYSIS
+============================================================
+
+The user is asking to understand Sakila data.
+
+Use the most appropriate analytical tools.
+
+Prioritize:
+
+- direct aggregation tools
+- dedicated analysis tools
+- prediction tools when prediction is explicitly requested
+
+Do not use raw data when a dedicated aggregation tool exists.
+
+Return only findings supported by the current tool results.
+
 """
 
 
 # ============================================================
-# 3. TOOL EXECUTION
+# 4. SYSTEM PROMPT
+# ============================================================
+
+SYSTEM_PROMPT = """
+
+You are Sakila AI Analyst.
+
+You are an AI business intelligence agent working with
+the Sakila rental database.
+
+IMPORTANT LANGUAGE RULE:
+
+Always answer the user in VIETNAMESE.
+
+Even if:
+
+- the user asks in English
+- database fields are in English
+- tool results are in English
+
+your final answer must be written in natural Vietnamese.
+
+Keep technical terms such as KPI, revenue, simulation,
+optimization, prediction, category when useful, but explain
+them naturally in Vietnamese.
+
+============================================================
+CORE AGENT BEHAVIOR
+============================================================
+
+You are NOT simply a chatbot.
+
+You operate as an autonomous BI analyst:
+
+USER QUESTION
+    ↓
+UNDERSTAND INTENT
+    ↓
+SELECT APPROPRIATE TOOL(S)
+    ↓
+EXECUTE TOOL(S)
+    ↓
+ANALYZE ACTUAL RESULTS
+    ↓
+DECIDE WHAT BI ELEMENTS ARE USEFUL
+    ↓
+RETURN STRUCTURED BI RESPONSE
+
+The user should NOT have to choose a tool or analysis page.
+
+You decide which tools are necessary.
+
+You may call multiple tools when necessary.
+
+============================================================
+CORE DATA RULES
+============================================================
+
+Always use actual tool results when the question requires
+Sakila data.
+
+Never invent:
+
+- revenue
+- rental counts
+- percentages
+- probabilities
+- predictions
+- prices
+- policy outcomes
+- chart values
+- KPI values
+
+Every numerical claim must be supported by tool results
+obtained during the current agent process.
+
+If the available tool results are insufficient:
+
+CALL ANOTHER APPROPRIATE TOOL.
+
+Never pretend that missing data exists.
+
+Never use your general knowledge to fabricate Sakila values.
+
+============================================================
+DEDICATED AGGREGATION RULE
+============================================================
+
+For:
+
+"What is the average rental rate by category?"
+
+or equivalent questions such as:
+
+- average rental rate for each category
+- rental rate trung bình theo category
+- giá thuê trung bình theo danh mục
+- category nào có rental rate trung bình cao nhất
+
+MUST call:
+
+analyze_average_rental_rate_by_category
+
+Do NOT use:
+
+- get_film_data
+- get_category_data
+- raw film records
+
+when the dedicated aggregation tool is available.
+
+Use the actual aggregation result directly.
+
+============================================================
+AUTOMATIC TOOL SELECTION
+============================================================
+
+Examples:
+
+"How much revenue do we make?"
+
+→ analyze_revenue_structure
+
+"Which category generates the most late fee revenue?"
+
+→ analyze_revenue_drivers
+
+"What is the average rental rate by category?"
+
+→ analyze_average_rental_rate_by_category
+
+"What percentage of rentals are late?"
+
+→ analyze_late_fee_revenue
+
+"Predict late return probability."
+
+→ predict_late_probability
+
+"Predict expected late days."
+
+→ predict_expected_late_days
+
+"What happens if we change the late fee?"
+
+→ simulate_fee_policy
+
+"When comparing several fee scenarios"
+
+→ compare_scenarios
+
+"What policy should we use?"
+
+→ generate_policy_recommendation
+
+"Apply business constraints."
+
+→ apply_policy_constraints
+
+Use multiple tools when the question requires them.
+
+============================================================
+FACT / INTERPRETATION / RECOMMENDATION
+============================================================
+
+FACT:
+
+A statement directly supported by tool results.
+
+INTERPRETATION:
+
+A reasonable conclusion derived from the tool results.
+
+RECOMMENDATION:
+
+A decision explicitly produced by the optimization
+pipeline.
+
+Do not present interpretation as fact.
+
+Do not invent recommendations.
+
+============================================================
+BI PRESENTATION
+============================================================
+
+The final answer must be designed for a BI dashboard UI.
+
+You may provide:
+
+1. KPI cards
+2. Charts
+3. Tables
+4. Narrative explanation
+5. Key insights
+
+The Streamlit application will render these structures.
+
+Do NOT describe imaginary visualizations in prose.
+
+Instead, provide structured visualization data.
+
+============================================================
+VISUALIZATION SELECTION
+============================================================
+
+Use BAR charts for:
+
+- category comparisons
+- rankings
+- revenue by category
+- late fee revenue by category
+- average rental rate by category
+- fee scenario comparisons
+
+Use LINE charts for:
+
+- ordered numeric scenarios
+- rental duration progression
+- fee progression
+
+Use PIE charts only for small part-to-whole comparisons.
+
+Use TABLES when:
+
+- multiple metrics need to be shown
+- exact values matter
+- there are many categories
+- scenario details matter
+
+Use KPI cards for the most important 1-4 numbers.
+
+Do not create a chart when it adds no value.
+
+============================================================
+VISUALIZATION DATA INTEGRITY
+============================================================
+
+Only visualize data that actually exists in the tool results.
+
+Never create:
+
+- fake rows
+- illustrative values
+- estimated chart values
+- manually invented percentages
+
+Numbers inside visualization data MUST come directly from
+tool results or calculations that are mathematically derived
+from values returned by the current tools.
+
+Preserve all relevant rows when the user asks for a full
+breakdown.
+
+For example, if a tool returns 16 categories and the user
+asks for all categories, return all 16 categories.
+
+============================================================
+OPTIMIZATION RULES
+============================================================
+
+When the user asks what policy, fee, price, or duration
+should be selected:
+
+1. Obtain required data.
+2. Generate predictions if necessary.
+3. Simulate scenarios.
+4. Apply business constraints.
+5. Compare feasible scenarios.
+6. Use the optimization result.
+7. Explain the result.
+
+Do NOT manually create an optimization objective.
+
+Do NOT hardcode fee constraints.
+
+Use constraints returned by the actual optimization tools.
+
+If the tool says the feasible fee range is $0.96-$1.52/day,
+use that result rather than inventing another range.
+
+============================================================
+SIMULATION LIMITATION
+============================================================
+
+The simulation may model demand response using a sensitivity
+assumption.
+
+The current simulation may hold late-return behavior constant
+across fee scenarios while demand changes with the fee.
+
+Therefore:
+
+Do NOT claim that changing the fee causes customers to become
+more or less likely to return late unless the simulation
+explicitly models and measures that behavioral effect.
+
+Use language such as:
+
+- "the simulated result"
+- "expected revenue"
+- "under the current simulation assumptions"
+
+when discussing simulation output.
+
+============================================================
+NUMERICAL INTEGRITY
+============================================================
+
+Do not mix values from different tools if they represent
+different definitions of the same KPI without explaining the
+difference.
+
+For example, if two tools return different total revenue
+values because they use different revenue definitions,
+choose the tool appropriate to the user's question and use
+its values consistently.
+
+Do not silently combine incompatible datasets.
+
+============================================================
+FINAL RESPONSE FORMAT
+============================================================
+
+Return ONLY valid JSON.
+
+Do not use markdown fences.
+
+Do not write anything before or after the JSON.
+
+Use exactly this top-level structure:
+
+{
+  "answer": "Giải thích ngắn gọn bằng tiếng Việt.",
+  "kpis": [],
+  "visualizations": [],
+  "tables": [],
+  "insights": []
+}
+
+============================================================
+KPI FORMAT
+============================================================
+
+Example:
+
+{
+  "label": "Tổng doanh thu",
+  "value": "$67,474.32",
+  "description": "Tổng doanh thu theo kết quả phân tích."
+}
+
+The KPI "value" may be a string for display.
+
+============================================================
+VISUALIZATION FORMAT
+============================================================
+
+Example:
+
+{
+  "type": "bar",
+  "title": "Doanh thu phí trả trễ theo category",
+  "description": "So sánh doanh thu phí trả trễ giữa các category.",
+  "x_key": "category",
+  "y_key": "late_fee_revenue",
+  "x_label": "Category",
+  "y_label": "Late fee revenue",
+  "value_prefix": "$",
+  "value_suffix": "",
+  "data": [
+    {
+      "category": "Sports",
+      "late_fee_revenue": 1707.97
+    }
+  ]
+}
+
+Rules:
+
+- type must be "bar", "line", or "pie"
+- x_key and y_key must match keys in data
+- numbers must remain numbers
+- do not convert numerical chart data into strings
+
+============================================================
+TABLE FORMAT
+============================================================
+
+Example:
+
+{
+  "title": "Doanh thu theo category",
+  "columns": [
+    "Category",
+    "Late fee revenue",
+    "Average late fee"
+  ],
+  "rows": [
+    {
+      "Category": "Sports",
+      "Late fee revenue": 1707.97,
+      "Average late fee": 1.45
+    }
+  ]
+}
+
+============================================================
+INSIGHTS
+============================================================
+
+Insights must be supported by tool results.
+
+Good:
+
+"Sports tạo ra $1,707.97 doanh thu phí trả trễ."
+
+Bad:
+
+"Sports chắc chắn có khách hàng trung thành hơn."
+
+unless the available data explicitly supports that claim.
+
+============================================================
+EMPTY SECTIONS
+============================================================
+
+If a section is not useful:
+
+"visualizations": []
+
+or
+
+"tables": []
+
+or
+
+"kpis": []
+
+or
+
+"insights": []
+
+Do not fill sections with meaningless content.
+
+============================================================
+ANSWER STYLE
+============================================================
+
+The "answer" field should:
+
+- be concise
+- be natural Vietnamese
+- directly answer the question
+- mention the most important result
+- distinguish observed vs simulated results
+- not repeat the entire table
+
+============================================================
+CURRENT TASK
+============================================================
+
+Analyze the user's question using the available tools.
+
+Automatically select and execute the necessary tools.
+
+Use actual tool results.
+
+Then return the BI response JSON.
+
+"""
+
+
+# ============================================================
+# 5. TOOL EXECUTION
 # ============================================================
 
 def execute_tool(tool_name, tool_input):
 
-    """
-    Execute a Python tool from TOOL_FUNCTIONS.
-    """
-
     if tool_name not in TOOL_FUNCTIONS:
-
         return {
             "error": f"Unknown tool: {tool_name}"
         }
@@ -99,13 +747,10 @@ def execute_tool(tool_name, tool_input):
     function = TOOL_FUNCTIONS[tool_name]
 
     try:
-
         result = function(**tool_input)
-
         return result
 
     except Exception as e:
-
         return {
             "error": (
                 f"Tool '{tool_name}' failed: "
@@ -115,65 +760,332 @@ def execute_tool(tool_name, tool_input):
 
 
 # ============================================================
-# 4. CLAUDE AGENT LOOP
+# 6. SERIALIZE TOOL RESULT
+# ============================================================
+
+def serialize_tool_result(result):
+
+    try:
+
+        result_json = json.dumps(
+            result,
+            ensure_ascii=False,
+            default=str
+        )
+
+        MAX_CHARS = 30000
+
+        if len(result_json) <= MAX_CHARS:
+            return result_json
+
+        print(
+            f"[Agent] Tool result too large: "
+            f"{len(result_json):,} characters"
+        )
+
+        if isinstance(result, dict):
+
+            compact = {}
+
+            for key, value in result.items():
+
+                if isinstance(value, list):
+
+                    if len(value) > 100:
+
+                        compact[key] = value[:100]
+
+                        compact[
+                            f"{key}_truncated"
+                        ] = True
+
+                    else:
+
+                        compact[key] = value
+
+                else:
+
+                    compact[key] = value
+
+            return json.dumps(
+                compact,
+                ensure_ascii=False,
+                default=str
+            )[:MAX_CHARS]
+
+        return result_json[:MAX_CHARS]
+
+    except Exception as e:
+
+        return json.dumps(
+            {
+                "error": (
+                    "Tool result could not be serialized."
+                ),
+                "details": str(e)
+            },
+            ensure_ascii=False
+        )
+
+
+# ============================================================
+# 7. EXTRACT JSON
+# ============================================================
+
+def extract_json(text):
+
+    if not text:
+        return None
+
+    text = text.strip()
+
+    # --------------------------------------------------------
+    # Direct JSON
+    # --------------------------------------------------------
+
+    try:
+        return json.loads(text)
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # Markdown JSON fence
+    # --------------------------------------------------------
+
+    match = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    if match:
+
+        try:
+            return json.loads(
+                match.group(1)
+            )
+
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # Find first JSON object
+    # --------------------------------------------------------
+
+    start = text.find("{")
+
+    if start >= 0:
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i in range(
+            start,
+            len(text)
+        ):
+
+            char = text[i]
+
+            if escape:
+
+                escape = False
+                continue
+
+            if char == "\\" and in_string:
+
+                escape = True
+                continue
+
+            if char == '"':
+
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == "{":
+
+                depth += 1
+
+            elif char == "}":
+
+                depth -= 1
+
+                if depth == 0:
+
+                    candidate = text[
+                        start:i + 1
+                    ]
+
+                    try:
+
+                        return json.loads(
+                            candidate
+                        )
+
+                    except Exception:
+
+                        break
+
+    return None
+
+
+# ============================================================
+# 8. NORMALIZE BI RESPONSE
+# ============================================================
+
+def normalize_response(data):
+
+    if not isinstance(data, dict):
+
+        return {
+            "answer": str(data),
+            "kpis": [],
+            "visualizations": [],
+            "tables": [],
+            "insights": []
+        }
+
+    answer = data.get(
+        "answer",
+        ""
+    )
+
+    if answer is None:
+        answer = ""
+
+    kpis = data.get(
+        "kpis",
+        []
+    )
+
+    visualizations = data.get(
+        "visualizations",
+        []
+    )
+
+    tables = data.get(
+        "tables",
+        []
+    )
+
+    insights = data.get(
+        "insights",
+        []
+    )
+
+    return {
+        "answer": str(answer),
+
+        "kpis": (
+            kpis
+            if isinstance(kpis, list)
+            else []
+        ),
+
+        "visualizations": (
+            visualizations
+            if isinstance(
+                visualizations,
+                list
+            )
+            else []
+        ),
+
+        "tables": (
+            tables
+            if isinstance(tables, list)
+            else []
+        ),
+
+        "insights": (
+            insights
+            if isinstance(insights, list)
+            else []
+        )
+    }
+
+
+# ============================================================
+# 9. CLAUDE AGENT LOOP
 # ============================================================
 
 def ask_claude(user_question):
 
-    """
-    Send a question to Claude and allow Claude
-    to use multiple tools until it can produce
-    a final answer.
-    """
+    mode = detect_mode(
+        user_question
+    )
+
+    print(
+        f"\n[Agent] Mode: {mode}"
+    )
+
+    system_prompt = (
+        SYSTEM_PROMPT
+        + build_mode_instruction(mode)
+    )
 
     messages = [
-
         {
             "role": "user",
             "content": user_question
         }
-
     ]
 
-    # --------------------------------------------------------
-    # Agent loop
-    # --------------------------------------------------------
+    tool_trace = []
+
+    MAX_TOOL_ROUNDS = 12
+    tool_round = 0
 
     while True:
+
+        if tool_round >= MAX_TOOL_ROUNDS:
+
+            return {
+                "answer": (
+                    "Agent đã thực hiện quá nhiều bước "
+                    "phân tích liên tiếp. Vui lòng thử "
+                    "câu hỏi cụ thể hơn."
+                ),
+                "kpis": [],
+                "visualizations": [],
+                "tables": [],
+                "insights": [],
+                "tool_trace": tool_trace
+            }
 
         response = client.messages.create(
 
             model=MODEL,
 
-            max_tokens=2048,
+            max_tokens=4096,
 
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
 
             messages=messages,
 
             tools=TOOL_DEFINITIONS
         )
 
-        # ----------------------------------------------------
-        # If Claude wants to use tools
-        # ----------------------------------------------------
+        # ====================================================
+        # TOOL USE
+        # ====================================================
 
         if response.stop_reason == "tool_use":
 
-            # Add Claude's response to conversation
+            tool_round += 1
 
-            messages.append({
-
-                "role": "assistant",
-
-                "content": response.content
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content
+                }
+            )
 
             tool_results = []
-
-            # ------------------------------------------------
-            # Process every tool Claude requested
-            # ------------------------------------------------
 
             for block in response.content:
 
@@ -181,7 +1093,6 @@ def ask_claude(user_question):
                     continue
 
                 tool_name = block.name
-
                 tool_input = block.input
 
                 print(
@@ -194,65 +1105,58 @@ def ask_claude(user_question):
                     f"{tool_input}"
                 )
 
-                # Execute Python function
-
                 result = execute_tool(
                     tool_name,
                     tool_input
                 )
 
-                print(
-                    f"[Agent] Tool completed."
+                tool_trace.append(
+                    {
+                        "tool": tool_name,
+                        "input": tool_input,
+                        "status": (
+                            "error"
+                            if (
+                                isinstance(
+                                    result,
+                                    dict
+                                )
+                                and
+                                "error" in result
+                            )
+                            else "success"
+                        )
+                    }
                 )
 
-                # Make sure result is JSON serializable
+                print(
+                    "[Agent] Tool completed."
+                )
 
-                try:
+                result_json = serialize_tool_result(
+                    result
+                )
 
-                    result_json = json.dumps(
-                        result,
-                        ensure_ascii=False
-                    )
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_json
+                    }
+                )
 
-                except TypeError:
-
-                    result_json = json.dumps(
-                        {
-                            "error":
-                                "Tool result is not JSON serializable."
-                        },
-                        ensure_ascii=False
-                    )
-
-                tool_results.append({
-
-                    "type": "tool_result",
-
-                    "tool_use_id":
-                        block.id,
-
-                    "content":
-                        result_json
-                })
-
-            # ------------------------------------------------
-            # Send tool results back to Claude
-            # ------------------------------------------------
-
-            messages.append({
-
-                "role": "user",
-
-                "content": tool_results
-            })
-
-            # Continue loop
+            messages.append(
+                {
+                    "role": "user",
+                    "content": tool_results
+                }
+            )
 
             continue
 
-        # ----------------------------------------------------
-        # Claude has finished
-        # ----------------------------------------------------
+        # ====================================================
+        # FINAL RESPONSE
+        # ====================================================
 
         final_text = []
 
@@ -264,104 +1168,88 @@ def ask_claude(user_question):
                     block.text
                 )
 
-        return "\n".join(final_text)
+        raw_answer = "\n".join(
+            final_text
+        ).strip()
+
+        parsed = extract_json(
+            raw_answer
+        )
+
+        # ----------------------------------------------------
+        # Claude failed to return JSON
+        # ----------------------------------------------------
+
+        if parsed is None:
+
+            parsed = {
+                "answer": raw_answer,
+                "kpis": [],
+                "visualizations": [],
+                "tables": [],
+                "insights": []
+            }
+
+        result = normalize_response(
+            parsed
+        )
+
+        result["tool_trace"] = tool_trace
+
+        return result
 
 
 # ============================================================
-# 5. TERMINAL INTERFACE
+# 10. TERMINAL INTERFACE
 # ============================================================
 
 def main():
 
     print("=" * 70)
-
-    print(
-        "SAKILA PRICE ELASTICITY AI ANALYST"
-    )
-
+    print("SAKILA AI AGENT")
     print("=" * 70)
 
     print(
-        "\nAsk questions about elasticity, "
-        "revenue and pricing."
+        "\nMode: Automatic"
     )
 
     print(
-        "Claude can use multiple analytical tools."
+        "Language: Vietnamese"
+    )
+
+    question = input(
+        "\nAsk Sakila AI Analyst: "
+    )
+
+    result = ask_claude(
+        question
     )
 
     print(
-        "\nType 'exit' to quit.\n"
+        "\n" + "=" * 70
     )
 
-    while True:
+    print(
+        "ANSWER"
+    )
 
-        try:
+    print(
+        "=" * 70
+    )
 
-            user_question = input("You: ")
-
-        except KeyboardInterrupt:
-
-            print("\nGoodbye.")
-
-            break
-
-        except EOFError:
-
-            print("\nGoodbye.")
-
-            break
-
-        # ----------------------------------------------------
-        # Exit
-        # ----------------------------------------------------
-
-        if user_question.lower().strip() in [
-            "exit",
-            "quit"
-        ]:
-
-            print("Goodbye.")
-
-            break
-
-        # ----------------------------------------------------
-        # Empty input
-        # ----------------------------------------------------
-
-        if not user_question.strip():
-
-            continue
-
-        # ----------------------------------------------------
-        # Ask Claude
-        # ----------------------------------------------------
-
-        try:
-
-            answer = ask_claude(
-                user_question
-            )
-
-            print("\nClaude:")
-            print(answer)
-            print()
-
-        except Exception as e:
-
-            print(
-                "\nClaude API error:"
-            )
-
-            print(e)
-
-            print()
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
 
 
 # ============================================================
-# 6. RUN
+# 11. ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
+

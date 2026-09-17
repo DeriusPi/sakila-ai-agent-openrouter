@@ -1,21 +1,19 @@
+import os
 import mysql.connector
+from dotenv import load_dotenv
 
-conn = mysql.connector.connect(
-    host="localhost",
-    port=3306,
-    user="root",
-    password="0913348843a",
-    database="sakila"
-)
+load_dotenv()
 
-print("Kết nối MySQL thành công!")
 
-cursor = conn.cursor()
+def get_connection():
+    """
+    Create and return a MySQL connection to the Sakila database.
+    """
 
-cursor.execute("SHOW TABLES")
-
-for table in cursor:
-    print(table)
-
-cursor.close()
-conn.close()
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", 3306)),
+        user=os.getenv("DB_USER", "root"),
+        password=os.getenv("DB_PASSWORD", ""),
+        database=os.getenv("DB_NAME", "sakila")
+    )

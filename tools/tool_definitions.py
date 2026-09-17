@@ -1,477 +1,707 @@
 # ============================================================
-# TOOL DEFINITIONS
+# SAKILA AI AGENT — TOOL DEFINITIONS
 # ============================================================
-
-from tools.data_tools import (
-    get_elasticity_results,
-    get_category_details,
-    get_elasticity_summary
-)
-
-from tools.analysis_tools import (
-    get_significant_categories,
-    rank_elasticity,
-    compare_categories
-)
-
-from tools.revenue.simulate_price_change import (
-    simulate_price_change
-)
-
-from tools.revenue.simulate_price_scenario import (
-    simulate_price_scenario
-)
-
-from tools.revenue.rank_revenue_opportunities import (
-    rank_revenue_opportunities
-)
-
-from tools.pricing.pricing_recommendation import (
-    pricing_recommendation
-)
 
 
 # ============================================================
-# PYTHON FUNCTIONS
+# DATA TOOLS
+# ============================================================
+
+from tools.data.get_rental_data import get_rental_data
+from tools.data.get_category_data import get_category_data
+from tools.data.get_customer_data import get_customer_data
+from tools.data.get_film_data import get_film_data
+from tools.data.get_store_data import get_store_data
+
+
+# ============================================================
+# ANALYSIS TOOLS
+# ============================================================
+
+from tools.analysis.analyze_average_rental_rate_by_category import (
+    analyze_average_rental_rate_by_category
+)
+
+from tools.analysis.analyze_revenue_structure import (
+    analyze_revenue_structure
+)
+
+from tools.analysis.analyze_late_fee_contribution import (
+    analyze_late_fee_contribution
+)
+
+from tools.analysis.analyze_late_fee_dependency import (
+    analyze_late_fee_dependency
+)
+
+from tools.analysis.analyze_revenue_drivers import (
+    analyze_revenue_drivers
+)
+
+
+# ============================================================
+# ML TOOLS
+# ============================================================
+
+from tools.ml.predict_late_probability import (
+    predict_late_probability
+)
+
+from tools.ml.predict_expected_late_days import (
+    predict_expected_late_days
+)
+
+
+# ============================================================
+# SIMULATION TOOLS
+# ============================================================
+
+from tools.simulation.simulate_fee_policy import (
+    simulate_fee_policy
+)
+
+from tools.simulation.simulate_rental_policy import (
+    simulate_rental_policy
+)
+
+from tools.simulation.compare_scenarios import (
+    compare_scenarios
+)
+
+
+# ============================================================
+# OPTIMIZATION TOOLS
+# ============================================================
+
+from tools.optimization.find_best_policy import (
+    find_best_policy
+)
+
+from tools.optimization.apply_policy_constraints import (
+    apply_policy_constraints
+)
+
+from tools.optimization.generate_policy_recommendation import (
+    generate_policy_recommendation
+)
+
+
+# ============================================================
+# PYTHON FUNCTION REGISTRY
 # ============================================================
 
 TOOL_FUNCTIONS = {
 
-    "get_elasticity_results":
-        get_elasticity_results,
+    # --------------------------------------------------------
+    # Data
+    # --------------------------------------------------------
 
-    "get_category_details":
-        get_category_details,
+    "get_rental_data": get_rental_data,
+    "get_category_data": get_category_data,
+    "get_customer_data": get_customer_data,
+    "get_film_data": get_film_data,
+    "get_store_data": get_store_data,
 
-    "get_elasticity_summary":
-        get_elasticity_summary,
+    # --------------------------------------------------------
+    # Analysis
+    # --------------------------------------------------------
 
-    "get_significant_categories":
-        get_significant_categories,
+    "analyze_revenue_structure": analyze_revenue_structure,
+    "analyze_average_rental_rate_by_category": analyze_average_rental_rate_by_category,
+    "analyze_late_fee_contribution": analyze_late_fee_contribution,
+    "analyze_late_fee_dependency": analyze_late_fee_dependency,
+    "analyze_revenue_drivers": analyze_revenue_drivers,
 
-    "rank_elasticity":
-        rank_elasticity,
+    # --------------------------------------------------------
+    # ML
+    # --------------------------------------------------------
 
-    "compare_categories":
-        compare_categories,
+    "predict_late_probability": predict_late_probability,
+    "predict_expected_late_days": predict_expected_late_days,
 
-    "simulate_price_change":
-        simulate_price_change,
+    # --------------------------------------------------------
+    # Simulation
+    # --------------------------------------------------------
 
-    "simulate_price_scenario":
-        simulate_price_scenario,
+    "simulate_fee_policy": simulate_fee_policy,
+    "simulate_rental_policy": simulate_rental_policy,
+    "compare_scenarios": compare_scenarios,
 
-    "rank_revenue_opportunities":
-        rank_revenue_opportunities,
+    # --------------------------------------------------------
+    # Optimization
+    # --------------------------------------------------------
+    
 
-    "pricing_recommendation":
-        pricing_recommendation
+    "find_best_policy": find_best_policy,
+    "apply_policy_constraints": apply_policy_constraints,
+    "generate_policy_recommendation": generate_policy_recommendation,
 }
 
 
 # ============================================================
-# CLAUDE TOOL SCHEMAS
+# CLAUDE / LLM TOOL SCHEMAS
 # ============================================================
 
 TOOL_DEFINITIONS = [
-
-    # ========================================================
-    # TOOL 1
-    # ========================================================
-
     {
-        "name": "get_elasticity_results",
-
-        "description":
-            "Get elasticity results for all product categories.",
-
+        "name": "analyze_average_rental_rate_by_category",
+        "description": (
+            "Calculate the average rental rate for ALL 16 Sakila "
+            "film categories directly from the MySQL database. "
+            "Returns one result for every category. "
+            "Use this tool for questions about average rental "
+            "rate by category. Do not use raw film-level data."
+        ),
         "input_schema": {
             "type": "object",
-
             "properties": {},
-
             "required": []
         }
     },
 
 
     # ========================================================
-    # TOOL 2
+    # DATA TOOLS
     # ========================================================
 
     {
-        "name": "get_category_details",
-
-        "description":
-            "Get detailed elasticity information for one category.",
-
+        "name": "get_rental_data",
+        "description": (
+            "Get rental transaction data including rental "
+            "duration, rental rate, return date, customer, "
+            "film, and category."
+        ),
         "input_schema": {
             "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
 
+    {
+        "name": "get_category_data",
+        "description": (
+            "Get rental and late-return statistics by "
+            "film category."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+    {
+        "name": "get_customer_data",
+        "description": (
+            "Get rental and late-return statistics "
+            "for customers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+    {
+        "name": "get_film_data",
+        "description": (
+            "Get film information including title, rental "
+            "duration, rental rate, and category."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+    {
+        "name": "get_store_data",
+        "description": (
+            "Get rental and revenue statistics by store."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+
+    # ========================================================
+    # ANALYSIS TOOLS
+    # ========================================================
+
+    {
+        "name": "analyze_revenue_structure",
+        "description": (
+            "Analyze total revenue, rental revenue, "
+            "late-fee revenue, and the contribution "
+            "of late fees to total revenue."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+    {
+        "name": "analyze_late_fee_contribution",
+        "description": (
+            "Analyze late-fee revenue contribution "
+            "overall and by film category."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+    {
+        "name": "analyze_late_fee_dependency",
+        "description": (
+            "Measure how dependent total Sakila revenue "
+            "is on late-fee revenue and calculate the "
+            "overall late-return rate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+    {
+        "name": "analyze_revenue_drivers",
+        "description": (
+            "Analyze late-fee revenue drivers by category, "
+            "rental duration, rental rate, and late days."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+
+
+    # ========================================================
+    # MACHINE LEARNING TOOLS
+    # ========================================================
+
+    {
+        "name": "predict_late_probability",
+        "description": (
+            "Predict the probability that a rental will "
+            "be returned late using customer late-return "
+            "rate, category, rental duration, and rental rate."
+        ),
+        "input_schema": {
+            "type": "object",
             "properties": {
+
+                "customer_late_rate": {
+                    "type": "number",
+                    "description": (
+                        "Historical late-return rate "
+                        "of the customer."
+                    )
+                },
 
                 "category": {
                     "type": "string",
+                    "description": "Film category."
+                },
 
-                    "description":
-                        "The category to analyze."
+                "rental_duration": {
+                    "type": "integer",
+                    "description": (
+                        "Allowed rental duration in days."
+                    )
+                },
+
+                "rental_rate": {
+                    "type": "number",
+                    "description": "Rental price."
                 }
             },
 
             "required": [
-                "category"
+                "customer_late_rate",
+                "category",
+                "rental_duration",
+                "rental_rate"
             ]
         }
     },
 
-
-    # ========================================================
-    # TOOL 3
-    # ========================================================
-
     {
-        "name": "get_elasticity_summary",
-
-        "description":
-            "Get a statistical summary of the elasticity dataset.",
-
+        "name": "predict_expected_late_days",
+        "description": (
+            "Predict the expected number of late days "
+            "for a rental using the trained machine-learning model."
+        ),
         "input_schema": {
             "type": "object",
-
-            "properties": {},
-
-            "required": []
-        }
-    },
-
-
-    # ========================================================
-    # TOOL 4
-    # ========================================================
-
-    {
-        "name": "get_significant_categories",
-
-        "description":
-            "Find categories whose elasticity estimates are statistically significant.",
-
-        "input_schema": {
-            "type": "object",
-
             "properties": {
 
-                "alpha": {
+                "customer_late_rate": {
                     "type": "number",
+                    "description": (
+                        "Historical late-return rate "
+                        "of the customer."
+                    )
+                },
 
-                    "description":
-                        "Significance level, usually 0.05.",
-
-                    "default": 0.05
-                }
-            },
-
-            "required": []
-        }
-    },
-
-
-    # ========================================================
-    # TOOL 5
-    # ========================================================
-
-    {
-        "name": "rank_elasticity",
-
-        "description":
-            "Rank categories according to their price elasticity.",
-
-        "input_schema": {
-            "type": "object",
-
-            "properties": {
-
-                "ascending": {
-                    "type": "boolean",
-
-                    "description":
-                        "Whether to rank from lowest to highest elasticity.",
-
-                    "default": True
-                }
-            },
-
-            "required": []
-        }
-    },
-
-
-    # ========================================================
-    # TOOL 6
-    # ========================================================
-
-    {
-        "name": "compare_categories",
-
-        "description":
-            "Compare elasticity results between two categories.",
-
-        "input_schema": {
-            "type": "object",
-
-            "properties": {
-
-                "category_1": {
+                "category": {
                     "type": "string",
-
-                    "description":
-                        "First category."
+                    "description": "Film category."
                 },
 
-                "category_2": {
+                "rental_duration": {
+                    "type": "integer",
+                    "description": (
+                        "Allowed rental duration in days."
+                    )
+                },
+
+                "rental_rate": {
+                    "type": "number",
+                    "description": "Rental price."
+                }
+            },
+
+            "required": [
+                "customer_late_rate",
+                "category",
+                "rental_duration",
+                "rental_rate"
+            ]
+        }
+    },
+
+
+    # ========================================================
+    # SIMULATION TOOLS
+    # ========================================================
+
+    {
+        "name": "simulate_fee_policy",
+        "description": (
+            "Simulate expected late-fee revenue under "
+            "a specific late-fee-per-day policy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+
+                "late_probability": {
+                    "type": "number",
+                    "description": (
+                        "Predicted probability of "
+                        "a late return."
+                    )
+                },
+
+                "expected_late_days": {
+                    "type": "number",
+                    "description": (
+                        "Expected number of late days."
+                    )
+                },
+
+                "fee_per_day": {
+                    "type": "number",
+                    "description": (
+                        "Late fee charged per late day."
+                    )
+                }
+            },
+
+            "required": [
+                "late_probability",
+                "expected_late_days",
+                "fee_per_day"
+            ]
+        }
+    },
+
+    {
+        "name": "simulate_rental_policy",
+        "description": (
+            "Compare the current rental duration with "
+            "a proposed rental duration using predicted "
+            "late probability and expected late days."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+
+                "customer_late_rate": {
+                    "type": "number",
+                    "description": (
+                        "Historical late-return rate "
+                        "of the customer."
+                    )
+                },
+
+                "category": {
                     "type": "string",
+                    "description": "Film category."
+                },
 
-                    "description":
-                        "Second category."
+                "current_rental_duration": {
+                    "type": "integer",
+                    "description": (
+                        "Current rental duration."
+                    )
+                },
+
+                "rental_rate": {
+                    "type": "number",
+                    "description": "Rental price."
+                },
+
+                "proposed_rental_duration": {
+                    "type": "integer",
+                    "description": (
+                        "Proposed rental duration."
+                    )
+                },
+
+                "fee_per_day": {
+                    "type": "number",
+                    "description": (
+                        "Late fee per late day."
+                    )
                 }
             },
 
             "required": [
-                "category_1",
-                "category_2"
+                "customer_late_rate",
+                "category",
+                "current_rental_duration",
+                "rental_rate",
+                "proposed_rental_duration",
+                "fee_per_day"
             ]
         }
     },
 
-
-    # ========================================================
-    # TOOL 7
-    # ========================================================
-
     {
-        "name": "simulate_price_change",
-
-        "description":
-            "Estimate demand and revenue after changing the price of a category.",
-
+        "name": "compare_scenarios",
+        "description": (
+            "Generate and compare alternative late-fee "
+            "and rental-duration policies based on "
+            "expected late-fee revenue."
+        ),
         "input_schema": {
             "type": "object",
-
             "properties": {
 
-                "current_price": {
-                    "type": "number",
-
-                    "description":
-                        "Current price."
+                "customer_late_rate": {
+                    "type": "number"
                 },
 
-                "current_demand": {
-                    "type": "number",
-
-                    "description":
-                        "Current demand."
+                "category": {
+                    "type": "string"
                 },
 
-                "new_price": {
-                    "type": "number",
-
-                    "description":
-                        "New proposed price."
+                "current_rental_duration": {
+                    "type": "integer"
                 },
 
-                "elasticity": {
-                    "type": "number",
-
-                    "description":
-                        "Price elasticity of demand."
-                }
-            },
-
-            "required": [
-                "current_price",
-                "current_demand",
-                "new_price",
-                "elasticity"
-            ]
-        }
-    },
-
-
-    # ========================================================
-    # TOOL 8
-    # ========================================================
-
-    {
-        "name": "simulate_price_scenario",
-
-        "description":
-            "Compare multiple possible prices and estimate demand and revenue for each price.",
-
-        "input_schema": {
-            "type": "object",
-
-            "properties": {
-
-                "current_price": {
-                    "type": "number",
-
-                    "description":
-                        "Current price."
+                "rental_rate": {
+                    "type": "number"
                 },
 
-                "current_demand": {
-                    "type": "number",
-
-                    "description":
-                        "Current demand."
-                },
-
-                "elasticity": {
-                    "type": "number",
-
-                    "description":
-                        "Price elasticity of demand."
-                },
-
-                "price_scenarios": {
+                "fee_options": {
                     "type": "array",
-
-                    "description":
-                        "List of possible prices to evaluate.",
-
                     "items": {
                         "type": "number"
                     }
-                }
-            },
+                },
 
-            "required": [
-                "current_price",
-                "current_demand",
-                "elasticity",
-                "price_scenarios"
-            ]
-        }
-    },
-
-
-    # ========================================================
-    # TOOL 9
-    # ========================================================
-
-    {
-        "name": "rank_revenue_opportunities",
-
-        "description":
-            "Rank categories by estimated revenue opportunity after a proposed price increase. Can filter to statistically significant elasticity estimates.",
-
-        "input_schema": {
-            "type": "object",
-
-            "properties": {
-
-                "category_data": {
+                "rental_duration_options": {
                     "type": "array",
-
-                    "description":
-                        "Category data containing price, demand, elasticity, and p-value.",
-
                     "items": {
-                        "type": "object"
+                        "type": "integer"
                     }
                 },
 
-                "price_increase_pct": {
+                "current_fee_per_day": {
                     "type": "number",
-
-                    "description":
-                        "Percentage increase in price to simulate.",
-
-                    "default": 10
-                },
-
-                "significant_only": {
-                    "type": "boolean",
-
-                    "description":
-                        "Whether to include only statistically significant categories.",
-
-                    "default": True
+                    "default": 1.00
                 }
             },
 
             "required": [
-                "category_data"
+                "customer_late_rate",
+                "category",
+                "current_rental_duration",
+                "rental_rate"
             ]
         }
     },
 
 
     # ========================================================
-    # TOOL 10
+    # OPTIMIZATION TOOLS
     # ========================================================
 
     {
-        "name": "pricing_recommendation",
-
-        "description":
-            "Provide a pricing recommendation for a category using elasticity, statistical significance, current price, demand, and proposed price.",
-
+        "name": "find_best_policy",
+        "description": (
+            "Find the policy scenario with the highest "
+            "expected late-fee revenue before business constraints."
+        ),
         "input_schema": {
             "type": "object",
-
             "properties": {
 
+                "customer_late_rate": {
+                    "type": "number"
+                },
+
                 "category": {
-                    "type": "string",
-
-                    "description":
-                        "Category being analyzed."
+                    "type": "string"
                 },
 
-                "current_price": {
-                    "type": "number",
-
-                    "description":
-                        "Current price."
+                "current_rental_duration": {
+                    "type": "integer"
                 },
 
-                "current_demand": {
-                    "type": "number",
-
-                    "description":
-                        "Current demand."
+                "rental_rate": {
+                    "type": "number"
                 },
 
-                "elasticity": {
-                    "type": "number",
-
-                    "description":
-                        "Price elasticity of demand."
+                "fee_options": {
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
                 },
 
-                "p_value": {
-                    "type": "number",
-
-                    "description":
-                        "P-value of the elasticity estimate."
+                "rental_duration_options": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
                 },
 
-                "proposed_price": {
+                "current_fee_per_day": {
                     "type": "number",
-
-                    "description":
-                        "Proposed new price."
+                    "default": 1.00
                 }
             },
 
             "required": [
+                "customer_late_rate",
                 "category",
-                "current_price",
-                "current_demand",
-                "elasticity",
-                "p_value",
-                "proposed_price"
+                "current_rental_duration",
+                "rental_rate"
+            ]
+        }
+    },
+
+    {
+        "name": "apply_policy_constraints",
+        "description": (
+            "Apply business constraints to policy scenarios "
+            "and select the highest expected-revenue feasible policy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+
+                "customer_late_rate": {
+                    "type": "number"
+                },
+
+                "category": {
+                    "type": "string"
+                },
+
+                "current_rental_duration": {
+                    "type": "integer"
+                },
+
+                "rental_rate": {
+                    "type": "number"
+                },
+
+                "min_rental_duration": {
+                    "type": "integer",
+                    "default": 3
+                },
+
+                "max_rental_duration": {
+                    "type": "integer",
+                    "default": 7
+                }
+            },
+
+            "required": [
+                "customer_late_rate",
+                "category",
+                "current_rental_duration",
+                "rental_rate"
+            ]
+        }
+    },
+
+    {
+        "name": "generate_policy_recommendation",
+        "description": (
+            "Generate the final late-fee policy recommendation "
+            "by combining scenario comparison, business constraints, "
+            "and expected late-fee revenue."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+
+                "customer_late_rate": {
+                    "type": "number"
+                },
+
+                "category": {
+                    "type": "string"
+                },
+
+                "current_rental_duration": {
+                    "type": "integer"
+                },
+
+                "rental_rate": {
+                    "type": "number"
+                },
+
+                "max_fee_per_day": {
+                    "type": "number",
+                    "default": 2.50
+                },
+
+                "min_rental_duration": {
+                    "type": "integer",
+                    "default": 3
+                },
+
+                "max_rental_duration": {
+                    "type": "integer",
+                    "default": 7
+                }
+            },
+
+            "required": [
+                "customer_late_rate",
+                "category",
+                "current_rental_duration",
+                "rental_rate"
             ]
         }
     }
@@ -489,7 +719,8 @@ if __name__ == "__main__":
     print("=" * 70)
 
     print(
-        f"\nTotal tools: {len(TOOL_DEFINITIONS)}"
+        f"\nTotal tools: "
+        f"{len(TOOL_DEFINITIONS)}"
     )
 
     print("\nAvailable tools:")
@@ -498,7 +729,6 @@ if __name__ == "__main__":
         TOOL_DEFINITIONS,
         start=1
     ):
-
         print(
             f"{i}. {tool['name']}"
         )

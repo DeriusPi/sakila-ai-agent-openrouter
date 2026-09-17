@@ -29,3 +29,7 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local SQL dumps
+sakila.sql
+sakila_backup.sql
