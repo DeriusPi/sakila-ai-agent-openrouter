@@ -3400,7 +3400,6 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                         <span class="material-symbols-outlined" style="font-size:13px;">auto_awesome</span>
                         AI OPTIMAL POLICY RECOMMENDATION
                     </div>
-
                     <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-top:14px;">
                         <div>
                             <div class="policy-value">{recommendation or "No feasible policy"}</div>
@@ -3410,7 +3409,6 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                             {html.escape(str(len(policy.get("feasible_scenarios", []))))} feasible scenarios
                         </div>
                     </div>
-
                     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;">
                         <div>
                             <div class="metric-label">POLICY TYPE</div>
