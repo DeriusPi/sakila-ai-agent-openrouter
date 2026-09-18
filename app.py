@@ -3403,7 +3403,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
 
                     <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-top:14px;">
                         <div>
-                            <div class="policy-value">{html.escape(str(recommendation or "No feasible policy"))}</div>
+                            <div class="policy-value">{recommendation or "No feasible policy"}</div>
                             <div class="policy-reason">{html.escape(str(reason))}</div>
                         </div>
                         <div class="metric-badge">
