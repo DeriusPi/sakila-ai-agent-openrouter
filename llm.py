@@ -6,9 +6,8 @@
 import os
 import json
 import re
-import anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
-
 from tools.tool_definitions import (
     TOOL_DEFINITIONS,
     TOOL_FUNCTIONS
@@ -21,17 +20,35 @@ from tools.tool_definitions import (
 
 load_dotenv()
 
-API_KEY = os.getenv("ANTHROPIC_API_KEY")
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 if not API_KEY:
-    raise RuntimeError("ANTHROPIC_API_KEY not found.")
+    raise RuntimeError("OPENROUTER_API_KEY not found.")
 
-client = anthropic.Anthropic(
-    api_key=API_KEY
+client = OpenAI(
+    api_key=API_KEY,
+    base_url="https://openrouter.ai/api/v1"
 )
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
+def convert_tools_to_openai_format(tools):
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"]
+            }
+        }
+        for tool in tools
+    ]
+
+
+OPENAI_TOOL_DEFINITIONS = convert_tools_to_openai_format(
+    TOOL_DEFINITIONS
+)
 
 # ============================================================
 # 2. MODE DETECTION
@@ -1015,9 +1032,7 @@ def normalize_response(data):
 
 def ask_claude(user_question):
 
-    mode = detect_mode(
-        user_question
-    )
+    mode = detect_mode(user_question)
 
     print(
         f"\n[Agent] Mode: {mode}"
@@ -1029,6 +1044,10 @@ def ask_claude(user_question):
     )
 
     messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        },
         {
             "role": "user",
             "content": user_question
@@ -1057,43 +1076,58 @@ def ask_claude(user_question):
                 "tool_trace": tool_trace
             }
 
-        response = client.messages.create(
+        response = client.chat.completions.create(
 
             model=MODEL,
 
-            max_tokens=4096,
-
-            system=system_prompt,
-
             messages=messages,
 
-            tools=TOOL_DEFINITIONS
+            max_tokens=4096,
+
+            tools=OPENAI_TOOL_DEFINITIONS,
+
+            tool_choice="auto"
         )
 
+        message = response.choices[0].message
         # ====================================================
         # TOOL USE
         # ====================================================
 
-        if response.stop_reason == "tool_use":
+        if message.tool_calls:
 
             tool_round += 1
 
+            # Preserve assistant tool-call message
             messages.append(
                 {
                     "role": "assistant",
-                    "content": response.content
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments
+                            }
+                        }
+                        for tool_call in message.tool_calls
+                    ]
                 }
             )
 
-            tool_results = []
+            for tool_call in message.tool_calls:
 
-            for block in response.content:
+                tool_name = tool_call.function.name
 
-                if block.type != "tool_use":
-                    continue
+                try:
+                    tool_input = json.loads(
+                        tool_call.function.arguments
+                    )
+                except Exception:
 
-                tool_name = block.name
-                tool_input = block.input
+                    tool_input = {}
 
                 print(
                     f"\n[Agent] Calling tool: "
@@ -1117,12 +1151,8 @@ def ask_claude(user_question):
                         "status": (
                             "error"
                             if (
-                                isinstance(
-                                    result,
-                                    dict
-                                )
-                                and
-                                "error" in result
+                                isinstance(result, dict)
+                                and "error" in result
                             )
                             else "success"
                         )
@@ -1137,20 +1167,13 @@ def ask_claude(user_question):
                     result
                 )
 
-                tool_results.append(
+                messages.append(
                     {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
                         "content": result_json
                     }
                 )
-
-            messages.append(
-                {
-                    "role": "user",
-                    "content": tool_results
-                }
-            )
 
             continue
 
@@ -1158,24 +1181,31 @@ def ask_claude(user_question):
         # FINAL RESPONSE
         # ====================================================
 
-        final_text = []
-
-        for block in response.content:
-
-            if hasattr(block, "text"):
-
-                final_text.append(
-                    block.text
-                )
-
-        raw_answer = "\n".join(
-            final_text
+        raw_answer = (
+            message.content or ""
         ).strip()
 
         parsed = extract_json(
             raw_answer
         )
 
+        if parsed is None:
+
+            parsed = {
+                "answer": raw_answer,
+                "kpis": [],
+                "visualizations": [],
+                "tables": [],
+                "insights": []
+            }
+
+        result = normalize_response(
+            parsed
+        )
+
+        result["tool_trace"] = tool_trace
+
+        return result
         # ----------------------------------------------------
         # Claude failed to return JSON
         # ----------------------------------------------------
