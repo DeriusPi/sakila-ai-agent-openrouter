@@ -1,9 +1,9 @@
-import joblib
-import os
 import pandas as pd
 
+from tools.ml._inputs import load_model, normalize_ml_inputs
 
-MODEL_PATH = "ml/models/late_days.pkl"
+
+MODEL_FILE = "late_days.pkl"
 
 
 def predict_expected_late_days(
@@ -15,41 +15,39 @@ def predict_expected_late_days(
     """
     Predict expected number of late days,
     conditional on the rental being late.
+
+    customer_late_rate must be a ratio 0-1 (0.512). Percentages such as
+    51.2 are converted automatically; category names are normalised.
     """
 
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"Model not found: {MODEL_PATH}"
-        )
+    inputs, warnings = normalize_ml_inputs(
+        customer_late_rate,
+        category,
+        rental_duration,
+        rental_rate,
+    )
 
-    model = joblib.load(MODEL_PATH)
+    model = load_model(MODEL_FILE)
 
     input_data = pd.DataFrame([
         {
-            "rental_duration": float(rental_duration),
-            "rental_rate": float(rental_rate),
-            "category": category,
-            "customer_late_rate": float(
-                customer_late_rate
-            )
+            "rental_duration": inputs["rental_duration"],
+            "rental_rate": inputs["rental_rate"],
+            "category": inputs["category"],
+            "customer_late_rate": inputs["customer_late_rate"],
         }
     ])
 
-    predicted_days = model.predict(
-        input_data
-    )[0]
-
     # Prevent impossible negative values
-    predicted_days = max(
-        float(predicted_days),
-        0.0
-    )
+    predicted_days = max(float(model.predict(input_data)[0]), 0.0)
 
-    return {
-        "expected_late_days": round(
-            predicted_days,
-            4
-        )
+    result = {
+        "expected_late_days": round(predicted_days, 4),
+        "definition": "Expected late days given that the rental is late.",
+        "inputs_used": inputs,
     }
 
+    if warnings:
+        result["warnings"] = warnings
 
+    return result

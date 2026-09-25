@@ -1,8 +1,56 @@
+import time
+
+from db import get_connection
 from tools.ml.predict_late_probability import predict_late_probability
 from tools.ml.predict_expected_late_days import predict_expected_late_days
-from tools.data.get_late_fee_data import get_late_fee_data
-from tools.data.get_film_data import get_film_data
-from tools.analysis.estimate_fee_behavior import estimate_fee_behavior
+
+
+_BASELINE_CACHE = {"value": None, "loaded_at": 0.0}
+_BASELINE_TTL_SECONDS = 600
+
+
+def _load_baseline():
+    """
+    Observed baseline volume used to scale the per-rental simulation to
+    business level. Cached for 10 minutes.
+
+    FIX: previously every call loaded all 15,861 rental rows, all 1,000
+    films and re-ran estimate_fee_behavior() only to read
+    baseline_rentals. compare_scenarios() calls this function ~10 times,
+    which made the policy page and the agent very slow (and time out on
+    remote databases). The value is identical: completed rentals.
+    """
+
+    now = time.time()
+
+    if (
+        _BASELINE_CACHE["value"] is not None
+        and now - _BASELINE_CACHE["loaded_at"] < _BASELINE_TTL_SECONDS
+    ):
+        return _BASELINE_CACHE["value"]
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*), "
+                "(SELECT COUNT(*) FROM film) "
+                "FROM rental WHERE return_date IS NOT NULL"
+            )
+            rentals, films = cursor.fetchone()
+    finally:
+        conn.close()
+
+    value = {
+        "baseline_rentals": int(rentals or 0),
+        "film_observations": int(films or 0),
+    }
+
+    _BASELINE_CACHE["value"] = value
+    _BASELINE_CACHE["loaded_at"] = now
+
+    return value
 
 
 def simulate_fee_policy(
@@ -27,6 +75,16 @@ def simulate_fee_policy(
     causal elasticity.
     """
 
+    try:
+        rental_rate = float(str(rental_rate).replace("$", "").strip())
+        fee_per_day = float(fee_per_day)
+        current_fee_per_day = float(current_fee_per_day)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "rental_rate, fee_per_day and current_fee_per_day "
+            "must be numbers."
+        )
+
     if fee_per_day <= 0:
         raise ValueError("fee_per_day must be greater than 0")
 
@@ -36,35 +94,20 @@ def simulate_fee_policy(
         )
 
     # ---------------------------------------------------------
-    # 1. Load observed data
+    # 1-2. Observed baseline volume (cached)
     # ---------------------------------------------------------
 
-    rental_data = get_late_fee_data()
-    film_data = get_film_data()
+    baseline = _load_baseline()
 
-    if not rental_data:
+    if baseline["baseline_rentals"] <= 0:
         raise ValueError("No rental data available.")
-
-    if not film_data:
-        raise ValueError("No film data available.")
-
-    # ---------------------------------------------------------
-    # 2. Derive behavioral parameters
-    # ---------------------------------------------------------
-
-    behavior = estimate_fee_behavior(
-        rental_data=rental_data,
-        film_data=film_data
-    )
 
     # Mild simulation assumption:
     # higher late fees reduce demand slightly.
     # This is NOT an observed causal elasticity.
     sensitivity = 0.10
 
-    baseline_rentals = float(
-        behavior["simulation"]["baseline_rentals"]
-    )
+    baseline_rentals = float(baseline["baseline_rentals"])
 
     # ---------------------------------------------------------
     # 3. ML predictions
@@ -259,13 +302,25 @@ def simulate_fee_policy(
             2
         ),
 
-        "data_source": {
-            "rental_observations": len(
-                rental_data
-            ),
+        "rental_duration": rental_duration,
 
-            "film_observations": len(
-                film_data
-            )
+        "rental_rate": round(rental_rate, 2),
+
+        "inputs_used": probability_result.get("inputs_used"),
+
+        "warnings": (
+            probability_result.get("warnings", [])
+        ),
+
+        "scale_note": (
+            "Simulated business-level revenue: the observed number of "
+            "completed rentals (baseline_rentals) is scaled with the "
+            "given customer/category/rate profile. It is a what-if "
+            "estimate, not observed revenue."
+        ),
+
+        "data_source": {
+            "rental_observations": int(baseline_rentals),
+            "film_observations": baseline["film_observations"],
         }
     }

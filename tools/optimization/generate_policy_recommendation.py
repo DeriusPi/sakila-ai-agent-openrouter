@@ -56,12 +56,23 @@ def generate_policy_recommendation(
 
     recommendation = best_policy["policy"]
 
+    if best_policy.get("policy_type") == "current":
+        reason = (
+            "Keeping the current policy gives the highest expected total "
+            "revenue among feasible scenarios under the current "
+            "simulation assumptions."
+        )
+    else:
+        reason = (
+            f"{recommendation} provides the highest expected total "
+            f"revenue among feasible policy scenarios "
+            f"(simulated change vs current policy: "
+            f"{best_policy.get('revenue_change_pct', 0):+.2f}%)."
+        )
+
     return {
         "recommendation": recommendation,
-        "reason": (
-            f"{recommendation} provides the highest expected "
-            f"total revenue among feasible policy scenarios."
-        ),
+        "reason": reason,
         "best_policy": best_policy,
         "feasible_scenarios": result["feasible_scenarios"],
         "rejected_scenarios": result["rejected_scenarios"],
@@ -69,7 +80,12 @@ def generate_policy_recommendation(
         "customer_late_rate": customer_late_rate,
         "category": category,
         "current_rental_duration": current_rental_duration,
-        "rental_rate": rental_rate
+        "rental_rate": rental_rate,
+        "scale_note": (
+            "Expected revenues are simulated business-level values "
+            "under the current simulation assumptions, not observed "
+            "revenue."
+        )
     }
 
 

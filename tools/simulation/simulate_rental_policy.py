@@ -17,6 +17,10 @@ def simulate_rental_policy(
     to estimate how the customer's late-return behavior may change.
     """
 
+    fee_per_day = float(fee_per_day)
+    current_rental_duration = int(float(current_rental_duration))
+    proposed_rental_duration = int(float(proposed_rental_duration))
+
     # -----------------------------
     # 1. Current policy prediction
     # -----------------------------
@@ -116,11 +120,25 @@ def simulate_rental_policy(
             2
         ),
 
+        # FIX: the old text always said "Increase rental duration",
+        # even when the proposed duration was shorter.
         "recommendation": (
-            "Increase rental duration"
+            (
+                "Increase rental duration"
+                if proposed_rental_duration > current_rental_duration
+                else "Shorten rental duration"
+            )
+            + f" to {proposed_rental_duration} days"
             if revenue_change > 0
             else "Keep current rental duration"
-        )
+        ),
+
+        "unit": (
+            "Expected late-fee revenue PER RENTAL for this profile "
+            "(late_probability x expected_late_days x fee_per_day). "
+            "Use compare_scenarios for business-level revenue."
+        ),
+
+        "inputs_used": current_probability.get("inputs_used"),
+        "warnings": current_probability.get("warnings", []),
     }
-
-

@@ -16,21 +16,20 @@ def analyze_revenue_structure():
 
     data = get_revenue_data()
 
-    rental_revenue = 0.0
+    total_revenue = 0.0
     late_fee_revenue = 0.0
 
     for row in data:
         amount = float(row["amount"])
         rental_rate = float(row["rental_rate"])
 
-        rental_revenue += rental_rate
+        total_revenue += amount
 
         extra = amount - rental_rate
-
         if extra > 0:
             late_fee_revenue += extra
 
-    total_revenue = rental_revenue + late_fee_revenue
+    rental_revenue = total_revenue - late_fee_revenue
 
     if total_revenue > 0:
         late_fee_contribution_pct = (

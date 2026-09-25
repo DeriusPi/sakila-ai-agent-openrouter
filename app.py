@@ -5,7 +5,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from llm import ask_claude
+from llm import ask_claude, get_model_label
 
 from tools.analysis.analyze_average_rental_rate_by_category import (
     analyze_average_rental_rate_by_category,
@@ -17,8 +17,9 @@ from tools.analysis.analyze_late_fee_dependency import (
     analyze_late_fee_dependency,
 )
 from tools.analysis.analyze_revenue_structure import analyze_revenue_structure
+from tools.data.business_metrics import get_business_kpis
 from tools.data.get_store_data import get_store_data
-from tools.data.get_rental_data import get_rental_data
+from tools.data.get_revenue_by_time import get_revenue_by_time
 
 from tools.data.get_category_data import get_category_data
 from tools.optimization.derive_fee_constraint import derive_fee_constraint
@@ -29,6 +30,7 @@ from tools.optimization.generate_policy_recommendation import (
 )
 from tools.simulation.compare_scenarios import compare_scenarios
 from tools.simulation.simulate_fee_policy import simulate_fee_policy
+from textwrap import dedent
 
 
 # ============================================================
@@ -1107,11 +1109,57 @@ PROFILE_URL = (
 # DATA HELPERS
 # ============================================================
 
+# Data-load errors are stored on the (persistent) db module so they
+# survive Streamlit reruns and cached calls.
+import time as _time
+
+import db as _db
+
+if not hasattr(_db, "RECENT_ERRORS"):
+    _db.RECENT_ERRORS = []
+    _db.LAST_CACHE_CLEAR = 0.0
+
+
 def safe_call(func, default=None, *args, **kwargs):
+    """
+    Call a backend tool. Errors are no longer swallowed silently:
+    they are logged and shown as a warning on the page instead of
+    displaying $0 / "—" as if it were real data.
+    """
+
     try:
         return func(*args, **kwargs)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        message = f"{getattr(func, '__name__', 'tool')}: {exc}"
+        print(f"[App] Data load failed - {message}")
+        _db.RECENT_ERRORS.append((_time.time(), message))
+        del _db.RECENT_ERRORS[:-20]
         return default
+
+
+def render_data_errors():
+    now = _time.time()
+    recent = [
+        (ts, msg) for ts, msg in _db.RECENT_ERRORS if now - ts < 300
+    ]
+
+    if not recent:
+        return
+
+    # Do not keep a failed (empty) result cached for 5 minutes:
+    # clear the data cache so the next interaction retries MySQL.
+    newest = max(ts for ts, _ in recent)
+    if newest > _db.LAST_CACHE_CLEAR:
+        st.cache_data.clear()
+        _db.LAST_CACHE_CLEAR = now
+
+    messages = list(dict.fromkeys(msg for _, msg in recent))
+
+    st.warning(
+        "Some data could not be loaded from MySQL, so parts of this page "
+        "may be empty. Check DB_HOST / DB_USER / DB_PASSWORD / DB_NAME.\n\n"
+        + "\n".join(f"- {err}" for err in messages[:5])
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1131,6 +1179,30 @@ def load_overview_data():
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def load_scope_kpis(category=None, store_id=None):
+    """
+    KPIs for any Overview scope (all / one category / one store /
+    category + store) from ONE consistent SQL tool.
+    """
+
+    result = safe_call(
+        get_business_kpis,
+        {},
+        category=category,
+        store_id=store_id,
+    )
+
+    return result if isinstance(result, dict) else {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_category_rows(store_id=None):
+    """Category revenue / late-fee rows, optionally for one store."""
+
+    result = safe_call(get_category_data, [], store_id=store_id)
+
+    return result if isinstance(result, list) else []
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_categories():
@@ -1228,88 +1300,79 @@ if "overview_store" not in st.session_state:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_monthly_rental_trend():
+def load_monthly_rental_trend(category=None, store_id=None):
 
-    rows = safe_call(
-        get_rental_data,
+    result = safe_call(
+        get_revenue_by_time,
+        {},
+        start_date="2005-05-01",
+        end_date="2006-02-28",
+        group_by="month",
+        category=category,
+        store_id=store_id,
+    )
+
+    if not isinstance(result, dict):
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "revenue",
+                "transaction_count",
+            ]
+        )
+
+    rows = result.get(
+        "grouped_revenue",
         [],
+    ) or []
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "revenue",
+                "transaction_count",
+            ]
+        )
+
+    trend = pd.DataFrame(rows)
+
+    if "group" not in trend.columns:
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "revenue",
+                "transaction_count",
+            ]
+        )
+
+    trend = trend.rename(
+        columns={
+            "group": "month",
+            "revenue": "revenue",
+        }
     )
 
-    if not isinstance(rows, list) or not rows:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "rental_revenue",
-            ]
-        )
+    if "transaction_count" not in trend.columns:
+        trend["transaction_count"] = 0
 
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "rental_revenue",
-            ]
-        )
-
-    if "rental_date" not in df.columns:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "rental_revenue",
-            ]
-        )
-
-    if "rental_rate" not in df.columns:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "rental_revenue",
-            ]
-        )
-
-    df["rental_date"] = pd.to_datetime(
-        df["rental_date"],
-        errors="coerce",
-    )
-
-    df["rental_rate"] = pd.to_numeric(
-        df["rental_rate"],
+    trend["revenue"] = pd.to_numeric(
+        trend["revenue"],
         errors="coerce",
     ).fillna(0)
 
-    df = df.dropna(
-        subset=["rental_date"]
-    )
+    trend["transaction_count"] = pd.to_numeric(
+        trend["transaction_count"],
+        errors="coerce",
+    ).fillna(0).astype(int)
 
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "rental_revenue",
-            ]
-        )
-
-    df["month"] = (
-        df["rental_date"]
-        .dt.to_period("M")
-        .astype(str)
-    )
-
-    result = (
-        df.groupby("month", as_index=False)
-        ["rental_rate"]
-        .sum()
-        .rename(
-            columns={
-                "rental_rate": "rental_revenue"
-            }
-        )
-        .sort_values("month")
-    )
-
-    return result
+    return trend[
+        [
+            "month",
+            "revenue",
+            "transaction_count",
+        ]
+    ].sort_values("month")
 
 
 # ============================================================
@@ -1390,12 +1453,12 @@ def render_top_header():
         )
 
     st.markdown(
-        """
+        f"""
         <div class="top-header">
             <div class="system-badge">
                 <span class="status-dot"></span>
                 <span class="mono">
-                    Sakila MySQL · Agent: Claude Sonnet 4.5
+                    Sakila MySQL · Agent: {html.escape(get_model_label())}
                 </span>
             </div>
         </div>
@@ -1561,25 +1624,13 @@ def render_sidebar(page):
         st.query_params["page"] = "analyst"
         st.rerun()
 
-    st.sidebar.markdown(
-        """
-        <div class="sidebar-bottom">
-            <div class="activity-nav">
-                <div class="activity-left">
-                    <span class="material-symbols-outlined"
-                          style="font-size:18px;">
-                        tune
-                    </span>
-                    <span>Agent Activity</span>
-                </div>
-                <span class="activity-dot"></span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    activity_placeholder = st.sidebar.empty()
 
+    with activity_placeholder.container():
+        st.markdown("### Agent Activity")
+        st.caption("READY")
 
+    return activity_placeholder
 
 def render_page_header(title, subtitle, eyebrow=None, model_note=None):
     if eyebrow:
@@ -1636,18 +1687,16 @@ def render_metric_card(label, value, badge=None, note="", primary_badge=False):
 
 
 def render_panel(title, subtitle="", body_html=""):
+    subtitle_html = (
+        f'<div class="card-subtitle">{html.escape(subtitle)}</div>'
+        if subtitle
+        else ""
+    )
     st.markdown(
-        f"""
-        <div class="section-card">
-            <div class="card-header">
-                <div class="card-title">{html.escape(title)}</div>
-                {f'<div class="card-subtitle">{html.escape(subtitle)}</div>' if subtitle else ''}
-            </div>
-            <div class="card-body">
-                {body_html}
-            </div>
-        </div>
-        """,
+        '<div class="section-card"><div class="card-header">'
+        f'<div class="card-title">{html.escape(title)}</div>'
+        f"{subtitle_html}</div>"
+        f'<div class="card-body">{body_html}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -1759,7 +1808,39 @@ def render_html_table(headers, rows, number_columns=None):
 # AGENT RESPONSE RENDERERS
 # ============================================================
 
+def _to_float_or_none(value):
+    """'$1,707.97' / '51.2%' / 1707.97 -> float, otherwise None."""
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, str):
+        text = (
+            value.replace("$", "")
+            .replace(",", "")
+            .replace("%", "")
+            .strip()
+        )
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    return None
+
+
 def render_agent_kpis(kpis):
+    # FIX: the model sometimes returns KPI strings instead of objects,
+    # which crashed the page with AttributeError.
+    kpis = [
+        kpi if isinstance(kpi, dict) else {"label": "Metric", "value": kpi}
+        for kpi in (kpis or [])
+        if kpi not in (None, "")
+    ]
+
     if not kpis:
         return
 
@@ -1778,6 +1859,17 @@ def render_agent_kpis(kpis):
 
 
 def render_agent_visualization(viz):
+    """
+    FIX:
+      - numbers sent as strings ("1,707.97", "$4,823.44") were plotted as
+        empty charts -> coerced to numbers;
+      - field names with ':' or '.' broke Altair shorthand -> use
+        field=/type= encodings;
+      - missing x_key/y_key are inferred from the data;
+      - bar chart width adapts to the number of bars instead of a fixed
+        1100px (horizontal overflow on small screens).
+    """
+
     if not isinstance(viz, dict):
         return
 
@@ -1787,53 +1879,113 @@ def render_agent_visualization(viz):
     data = viz.get("data", [])
     x_key = viz.get("x_key")
     y_key = viz.get("y_key")
+    x_label = viz.get("x_label")
+    y_label = viz.get("y_label")
 
     if not isinstance(data, list) or not data:
         return
 
-    df = pd.DataFrame(data)
+    rows = [row for row in data if isinstance(row, dict)]
+
+    if not rows:
+        return
+
+    df = pd.DataFrame(rows)
     if df.empty:
         return
 
+    if x_key not in df.columns:
+        x_key = next(
+            (c for c in df.columns if df[c].map(_to_float_or_none).isna().any()),
+            df.columns[0],
+        )
+
+    if y_key not in df.columns:
+        y_key = next(
+            (
+                c for c in df.columns
+                if c != x_key and df[c].map(_to_float_or_none).notna().all()
+            ),
+            None,
+        )
+
+    # FIX: build the header on one line - an empty indented line (when
+    # there is no description) made Markdown render a stray "</div>"
+    # code block above the chart.
+    subtitle_html = (
+        f'<div class="card-subtitle">{html.escape(str(description))}</div>'
+        if description
+        else ""
+    )
+
     st.markdown(
-        f"""
-        <div class="section-card" style="margin-top:14px;">
-            <div class="card-header">
-                <div class="card-title">{html.escape(str(title))}</div>
-                {f'<div class="card-subtitle">{html.escape(str(description))}</div>' if description else ''}
-            </div>
-        </div>
-        """,
+        '<div class="section-card" style="margin-top:14px;">'
+        '<div class="card-header">'
+        f'<div class="card-title">{html.escape(str(title))}</div>'
+        f"{subtitle_html}"
+        "</div></div>",
         unsafe_allow_html=True,
     )
 
-    if x_key not in df.columns or y_key not in df.columns:
+    if y_key is None or x_key not in df.columns:
         st.dataframe(df, use_container_width=True, hide_index=True)
         return
 
+    df[y_key] = df[y_key].map(_to_float_or_none)
+    df = df[df[y_key].notna()]
+    df[x_key] = df[x_key].astype(str)
+
+    if df.empty:
+        st.info("The chart data returned by the agent is not numeric.")
+        return
+
+    x_title = x_label or None
+    y_title = y_label or None
+    tooltip = [
+        alt.Tooltip(field=x_key, type="nominal"),
+        alt.Tooltip(field=y_key, type="quantitative", format=",.2f"),
+    ]
+
     if chart_type == "bar":
+        bar_count = len(df)
         chart = (
             alt.Chart(df)
             .mark_bar(color="#312E81")
             .encode(
-                x=alt.X(f"{x_key}:N", sort="-y", title=None),
-                y=alt.Y(f"{y_key}:Q", title=None),
-                tooltip=[x_key, y_key],
+                x=alt.X(
+                    field=x_key,
+                    type="nominal",
+                    sort="-y",
+                    title=x_title,
+                    axis=alt.Axis(
+                        labelAngle=0 if bar_count <= 8 else -40,
+                        labelOverlap=False,
+                        labelLimit=140,
+                    ),
+                ),
+                y=alt.Y(field=y_key, type="quantitative", title=y_title),
+                tooltip=tooltip,
             )
-            .properties(height=240)
+            .properties(height=300)
         )
         st.altair_chart(chart, use_container_width=True)
 
     elif chart_type == "line":
         chart = (
             alt.Chart(df)
-            .mark_line(color="#312E81", strokeWidth=2)
+            .mark_line(color="#312E81", strokeWidth=2, point=True)
             .encode(
-                x=alt.X(f"{x_key}:N", title=None),
-                y=alt.Y(f"{y_key}:Q", title=None),
-                tooltip=[x_key, y_key],
+                x=alt.X(
+                    field=x_key,
+                    type="nominal",
+                    sort=None,
+                    title=x_title,
+                    axis=alt.Axis(labelAngle=0, labelOverlap=False),
+                ),
+                y=alt.Y(field=y_key, type="quantitative", title=y_title),
+                tooltip=tooltip,
             )
-            .properties(height=240)
+            .properties(height=260)
         )
         st.altair_chart(chart, use_container_width=True)
 
@@ -1842,13 +1994,14 @@ def render_agent_visualization(viz):
             alt.Chart(df)
             .mark_arc(innerRadius=55)
             .encode(
-                theta=alt.Theta(f"{y_key}:Q"),
+                theta=alt.Theta(field=y_key, type="quantitative"),
                 color=alt.Color(
-                    f"{x_key}:N",
+                    field=x_key,
+                    type="nominal",
                     scale=alt.Scale(range=["#312E81", "#64748B", "#94A3B8", "#CBD5E1"]),
                     legend=alt.Legend(title=None),
                 ),
-                tooltip=[x_key, y_key],
+                tooltip=tooltip,
             )
             .properties(height=260)
         )
@@ -1864,11 +2017,23 @@ def render_agent_table(table):
 
     title = table.get("title", "Data")
     rows = table.get("rows", [])
+    columns = table.get("columns") or None
 
     if not rows:
         return
 
-    df = pd.DataFrame(rows)
+    # FIX: rows given as lists (with a separate "columns" list) used to
+    # render with 0,1,2 headers or fail.
+    if all(isinstance(row, (list, tuple)) for row in rows):
+        width = len(rows[0])
+        if not columns or len(columns) != width:
+            columns = [f"Col {i + 1}" for i in range(width)]
+        df = pd.DataFrame(rows, columns=columns)
+    else:
+        df = pd.DataFrame([row for row in rows if isinstance(row, dict)])
+        if columns and set(columns).issubset(df.columns):
+            df = df[columns]
+
     if df.empty:
         return
 
@@ -1884,7 +2049,22 @@ def render_agent_table(table):
 
 
 def render_agent_insights(insights):
-    if not insights:
+    items = []
+
+    for insight in insights or []:
+        if isinstance(insight, dict):
+            text = " — ".join(
+                str(insight.get(k))
+                for k in ("title", "text", "insight", "description")
+                if insight.get(k)
+            )
+        else:
+            text = str(insight or "").strip()
+
+        if text:
+            items.append(text)
+
+    if not items:
         return
 
     st.markdown(
@@ -1892,59 +2072,509 @@ def render_agent_insights(insights):
         unsafe_allow_html=True,
     )
 
-    cols = st.columns(min(len(insights), 3))
-    for index, insight in enumerate(insights):
+    cols = st.columns(min(len(items), 3))
+    for index, insight in enumerate(items):
         with cols[index % len(cols)]:
             st.markdown(
                 f"""
                 <div class="insight-card">
                     <div class="insight-title">{index + 1}. Insight</div>
-                    <div class="insight-text">{html.escape(str(insight))}</div>
+                    <div class="insight-text">{html.escape(insight)}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
 
+def _compact_activity_text(
+    value,
+    limit=520,
+):
+    text = str(value or "")
+    text = text.replace("\n", " ").strip()
+
+    if len(text) > limit:
+        return text[:limit] + "..."
+
+    return text
 
 
-def render_agent_activity(trace):
+def _activity_event_view(event):
+    if not isinstance(event, dict):
+        return (
+            "PROCESS",
+            _compact_activity_text(event),
+        )
 
+    name = str(
+        event.get("event", "")
+    ).lower()
+
+    labels = {
+        "question_received": "QUESTION RECEIVED",
+        "mode": "MODE DETECTED",
+        "agent_decision": "AGENT DECISION",
+        "tool_selected": "TOOL SELECTED",
+        "tool_call": "EXECUTING BI TOOL",
+        "tool_output": "BI OUTPUT RECEIVED",
+        "tool_completed": "TOOL COMPLETED",
+        "next_step": "NEXT AGENT STEP",
+        "synthesis_started": "SYNTHESIZING ANSWER",
+        "answer_ready": "ANSWER READY",
+        "completed": "COMPLETED",
+        "error": "ERROR",
+    }
+
+    label = labels.get(
+        name,
+        name.upper() or "PROCESS",
+    )
+
+    if name == "question_received":
+        return (
+            label,
+            _compact_activity_text(
+                event.get("question", "")
+            ),
+        )
+
+    if name == "mode":
+        return (
+            label,
+            f"Mode: {event.get('mode', '')}",
+        )
+
+    if name == "agent_decision":
+        tools = event.get(
+            "tools",
+            [],
+        ) or []
+
+        return (
+            label,
+            f"Round {event.get('round', '?')} · "
+            f"Selected: "
+            f"{', '.join(str(x) for x in tools) or 'no tool'}",
+        )
+
+    if name == "tool_selected":
+        return (
+            label,
+            f"{event.get('tool', 'unknown')} · "
+            f"Input: "
+            f"{_compact_activity_text(event.get('input', {}), 360)}",
+        )
+
+    if name == "tool_call":
+        return (
+            label,
+            f"Running {event.get('tool', 'unknown')}",
+        )
+
+    if name == "tool_output":
+        return (
+            label,
+            _compact_activity_text(
+                event.get("output", ""),
+                700,
+            ),
+        )
+
+    if name == "tool_completed":
+        status = str(
+            event.get(
+                "status",
+                "unknown",
+            )
+        ).upper()
+
+        error = event.get(
+            "error",
+            "",
+        )
+
+        if error:
+            return (
+                label,
+                f"{status} · "
+                f"{_compact_activity_text(error, 260)}",
+            )
+
+        return (
+            label,
+            status,
+        )
+
+    if name == "next_step":
+        return (
+            label,
+            f"Round {event.get('round', '?')} · "
+            f"{event.get('tool_count', 0)} "
+            f"tool result(s) returned to Agent",
+        )
+
+    if name == "synthesis_started":
+        return (
+            label,
+            f"{event.get('tool_count', 0)} tool call(s) · "
+            f"{event.get('rounds', 0)} round(s)",
+        )
+
+    if name == "answer_ready":
+        sections = []
+
+        if event.get("has_kpis"):
+            sections.append("KPI")
+
+        if event.get("has_visualizations"):
+            sections.append("Visualization")
+
+        if event.get("has_tables"):
+            sections.append("Table")
+
+        if event.get("has_insights"):
+            sections.append("Insights")
+
+        return (
+            label,
+            "Prepared: "
+            + (
+                ", ".join(sections)
+                if sections
+                else "Answer"
+            ),
+        )
+
+    if name == "completed":
+        return (
+            label,
+            f"{event.get('tool_count', 0)} tool call(s)",
+        )
+
+    if name == "error":
+        return (
+            label,
+            _compact_activity_text(
+                event.get("error", "")
+            ),
+        )
+
+    return (
+        label,
+        _compact_activity_text(
+            event.get("detail", "")
+        ),
+    )
+
+
+def _activity_text(
+    value,
+    limit=420,
+):
+    text = str(value or "")
+    text = text.replace("\n", " ").strip()
+
+    if len(text) > limit:
+        return text[:limit] + "..."
+
+    return text
+
+
+def _activity_symbol(status):
+    status = str(
+        status or "READY"
+    ).upper()
+
+    if status == "RUNNING":
+        return "◌", "#4F46E5"
+
+    if status == "SUCCESS":
+        return "✓", "#334155"
+
+    if status == "ERROR":
+        return "!", "#B91C1C"
+
+    return "•", "#64748B"
+
+
+def render_live_agent_activity(
+    placeholder,
+    state,
+):
+    status = str(
+        state.get(
+            "status",
+            "READY",
+        )
+    ).upper()
+
+    steps = state.get(
+        "steps",
+        [],
+    ) or []
+
+    if status == "RUNNING":
+        status_badge = "RUNNING"
+        badge_color = "#4338CA"
+
+    elif status == "ERROR":
+        status_badge = "ERROR"
+        badge_color = "#B91C1C"
+
+    elif status == "COMPLETED":
+        status_badge = "COMPLETED"
+        badge_color = "#334155"
+
+    else:
+        status_badge = "READY"
+        badge_color = "#64748B"
+
+    rows = []
+
+    if not steps:
+        rows.append(
+            dedent(
+                """
+                <div style="
+                    padding:6px 12px;
+                    font:500 9px 'JetBrains Mono',monospace;
+                    color:#64748B;
+                ">
+                    ● Processing user request
+                </div>
+                """
+            )
+        )
+
+    for step in steps[-30:]:
+        label = html.escape(
+            str(
+                step.get(
+                    "label",
+                    step.get(
+                        "tool",
+                        "unknown",
+                    ),
+                )
+            )
+        )
+
+        step_status = str(
+            step.get(
+                "status",
+                "READY",
+            )
+        ).upper()
+
+        symbol, symbol_color = _activity_symbol(
+            step_status
+        )
+
+        detail = _activity_text(
+            step.get(
+                "detail",
+                "",
+            ),
+            420,
+        )
+
+        detail_html = ""
+
+        if detail:
+            detail_html = (
+                f"""
+                <div style="
+                    margin-top:3px;
+                    padding-left:20px;
+                    color:#94A3B8;
+                    font-size:8px;
+                    line-height:1.35;
+                    overflow:hidden;
+                    text-overflow:ellipsis;
+                    white-space:nowrap;
+                ">
+                    {html.escape(detail)}
+                </div>
+                """
+            )
+
+        rows.append(
+            dedent(
+                f"""
+                <div style="
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:flex-start;
+                    gap:8px;
+                    padding:7px 12px;
+                    border-bottom:1px solid #F8FAFC;
+                    font:500 9px 'JetBrains Mono',monospace;
+                ">
+                    <div style="
+                        min-width:0;
+                        flex:1;
+                    ">
+                        <div style="
+                            color:#334155;
+                            display:flex;
+                            align-items:center;
+                            min-width:0;
+                        ">
+                            <span style="
+                                color:{symbol_color};
+                                font-size:12px;
+                                margin-right:5px;
+                                flex-shrink:0;
+                            ">
+                                {symbol}
+                            </span>
+                            <span style="
+                                overflow:hidden;
+                                text-overflow:ellipsis;
+                                white-space:nowrap;
+                            ">
+                                {label}
+                            </span>
+                        </div>
+                        {detail_html}
+                    </div>
+
+                    <span style="
+                        color:{symbol_color};
+                        font-size:8px;
+                        white-space:nowrap;
+                        flex-shrink:0;
+                    ">
+                        {step_status}
+                    </span>
+                </div>
+                """
+            )
+        )
+
+    html_block = dedent(
+        f"""
+        <div style="
+            width:100%;
+            box-sizing:border-box;
+            background:#FFFFFF;
+            margin-top:8px;
+        ">
+
+            <div style="
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                padding:8px 12px;
+                border-bottom:1px solid #E2E8F0;
+            ">
+
+                <div style="
+                    display:flex;
+                    align-items:center;
+                    gap:7px;
+                    color:#0F172A;
+                    font:600 10px 'JetBrains Mono',monospace;
+                ">
+
+                    <span class="material-symbols-outlined"
+                          style="font-size:18px;">
+                        tune
+                    </span>
+
+                    <span>Agent Activity</span>
+
+                </div>
+
+                <span style="
+                    font:600 8px 'JetBrains Mono',monospace;
+                    color:{badge_color};
+                ">
+                    {status_badge}
+                </span>
+
+            </div>
+
+            {''.join(rows)}
+
+
+        </div>
+        """
+    )
+
+    html_block = "\n".join(
+        line.lstrip()
+        for line in html_block.splitlines()
+    )
+
+    placeholder.markdown(
+        html_block,
+        unsafe_allow_html=True,
+    )
+
+
+
+def render_agent_activity(
+    trace,
+    events=None,
+):
     trace = trace or []
+    events = events or []
+
+    completed = any(
+        isinstance(event, dict)
+        and event.get("event") == "completed"
+        for event in events
+    )
+
+    status = (
+        "COMPLETED"
+        if completed or trace
+        else "READY"
+    )
 
     with st.container(
         border=True,
     ):
-
-        header_left, header_right = st.columns(
+        left, right = st.columns(
             [3, 1]
         )
 
-        with header_left:
+        with left:
             st.markdown(
                 "### Agent Activity"
             )
 
-        with header_right:
-            if trace:
-                st.caption("ACTIVE")
-            else:
-                st.caption("READY")
+        with right:
+            st.caption(status)
 
         st.caption(
-            "TOOL EXECUTION STEPS"
+            "FULL AGENT PROCESS"
         )
 
-        if not trace:
+        if events:
+            for event in events[-30:]:
+                label, detail = _activity_event_view(
+                    event
+                )
 
-            st.info(
-                "No tool execution in the current session."
-            )
+                st.markdown(
+                    f"**{label}**"
+                )
 
-        else:
+                if detail:
+                    if label == "BI OUTPUT RECEIVED":
+                        st.code(
+                            detail,
+                            language="text",
+                        )
+                    else:
+                        st.caption(
+                            detail
+                        )
 
+        elif trace:
             for item in trace:
-
                 if not isinstance(
                     item,
                     dict,
@@ -1958,7 +2588,7 @@ def render_agent_activity(trace):
                     )
                 )
 
-                status = str(
+                status_text = str(
                     item.get(
                         "status",
                         "complete",
@@ -1971,38 +2601,53 @@ def render_agent_activity(trace):
 
                 with c1:
                     st.markdown(
-                        f"✓  `{tool}`"
+                        f"✓ `{tool}`"
                     )
 
                 with c2:
                     st.caption(
-                        status
+                        status_text
                     )
 
-                st.divider()
-
-        st.caption("Agent telemetry")
-
-        t1, t2, t3 = st.columns(3)
-
-        with t1:
-            st.metric(
-                "Model",
-                "Claude Sonnet 4.5",
+        else:
+            st.info(
+                "No Agent activity in the current session."
             )
 
-        with t2:
+        tool_count = sum(
+            1
+            for event in events
+            if isinstance(event, dict)
+            and event.get("event")
+            == "tool_selected"
+        )
+
+        if not tool_count:
+            tool_count = len(trace)
+
+        st.caption(
+            "Agent telemetry"
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.metric(
+                "Model",
+                get_model_label(),
+            )
+
+        with c2:
             st.metric(
                 "Data Source",
                 "Sakila MySQL",
             )
 
-        with t3:
+        with c3:
             st.metric(
                 "Tool Calls",
-                len(trace),
+                tool_count,
             )
-
 
 
 
@@ -2079,242 +2724,87 @@ def render_overview():
         []
     ) or []
 
-    category_rows = (
-        late_fee.get(
-            "categories",
-            []
-        )
-        if isinstance(late_fee, dict)
-        else []
+    # ========================================================
+    # SCOPE (category and/or store)
+    # ========================================================
+    #
+    # FIX: all KPIs now come from get_business_kpis() for the selected
+    # scope. Previously:
+    #   - with a store selected, "Rental revenue" showed the store's
+    #     TOTAL revenue and late fees / late rate showed "—";
+    #   - with a category selected, the late rate used a DATEDIFF rule
+    #     that did not match the overall 51.20% definition;
+    #   - with both selected, the category filter was ignored;
+    #   - the revenue trend ignored both filters.
+
+    selected_category_name = (
+        None
+        if selected_category == "All Film Categories"
+        else selected_category
     )
 
-    category_detail = load_category_detail_data()
+    selected_store_id = None
 
-    # ========================================================
-    # CATEGORY SCOPE
-    # ========================================================
+    if selected_store != "All Stores":
+        try:
+            selected_store_id = int(
+                str(selected_store).replace("Store #", "").strip()
+            )
+        except Exception:
+            selected_store_id = None
+
+    scope_kpis = load_scope_kpis(
+        selected_category_name,
+        selected_store_id,
+    )
+
+    # Category rows for the category panels (store-scoped when a store
+    # is selected, so the panels match the KPI cards).
+    category_rows = load_category_rows(selected_store_id)
 
     selected_category_row = None
 
-    if selected_category != "All Film Categories":
-
+    if selected_category_name:
         for row in category_rows:
-
-            if (
-                row.get("category")
-                == selected_category
-            ):
+            if row.get("category") == selected_category_name:
                 selected_category_row = row
                 break
 
-    selected_category_detail = None
-
-    if selected_category != "All Film Categories":
-
-        for row in category_detail:
-
-            if (
-                row.get("category")
-                == selected_category
-            ):
-                selected_category_detail = row
-                break
-
-    # ========================================================
-    # STORE SCOPE
-    # ========================================================
-
     selected_store_row = None
 
-    if selected_store != "All Stores":
-
-        try:
-
-            store_id = int(
-                selected_store.replace(
-                    "Store #",
-                    "",
-                )
-            )
-
-            for row in stores:
-
-                if (
-                    int(
-                        row.get(
-                            "store_id",
-                            -1,
-                        )
-                    )
-                    == store_id
-                ):
+    if selected_store_id is not None:
+        for row in stores:
+            try:
+                if int(row.get("store_id", -1)) == selected_store_id:
                     selected_store_row = row
                     break
+            except Exception:
+                continue
 
-        except Exception:
-            selected_store_row = None
+    total_revenue = float(scope_kpis.get("total_revenue", 0) or 0)
+    rental_revenue = float(scope_kpis.get("rental_revenue", 0) or 0)
+    late_fee_revenue = float(scope_kpis.get("late_fee_revenue", 0) or 0)
+    late_fee_pct = float(
+        scope_kpis.get("late_fee_contribution_pct", 0) or 0
+    )
+    total_rentals = int(scope_kpis.get("completed_rentals", 0) or 0)
+    late_rentals = int(scope_kpis.get("late_rentals", 0) or 0)
+    late_rate = float(scope_kpis.get("late_rate_pct", 0) or 0)
+    payment_count = int(scope_kpis.get("payment_count", 0) or 0)
 
-    # ========================================================
-    # METRICS
-    # ========================================================
+    scope_parts = []
 
-    if selected_store_row:
+    if selected_store_id is not None:
+        scope_parts.append(f"Store #{selected_store_id}")
 
-        store_revenue = float(
-            selected_store_row.get(
-                "total_revenue",
-                0,
-            )
-            or 0
-        )
+    if selected_category_name:
+        scope_parts.append(f"Category: {selected_category_name}")
 
-        store_rentals = int(
-            selected_store_row.get(
-                "total_rentals",
-                0,
-            )
-            or 0
-        )
-
-        total_revenue = store_revenue
-        rental_revenue = store_revenue
-        late_fee_revenue = 0
-        late_fee_pct = 0
-        total_rentals = store_rentals
-
-        # Store tool does not expose late-fee detail.
-        late_rentals = None
-        late_rate = None
-
-        scope_note = (
-            f"{selected_store} · "
-            "Store-level aggregate"
-        )
-
-    elif selected_category_row:
-
-        total_revenue = float(
-            selected_category_row.get(
-                "total_revenue",
-                0,
-            )
-            or 0
-        )
-
-        rental_revenue = float(
-            selected_category_row.get(
-                "rental_revenue",
-                0,
-            )
-            or 0
-        )
-
-        late_fee_revenue = float(
-            selected_category_row.get(
-                "late_fee_revenue",
-                0,
-            )
-            or 0
-        )
-
-        late_fee_pct = (
-            late_fee_revenue
-            / total_revenue
-            * 100
-            if total_revenue
-            else 0
-        )
-
-        total_rentals = int(
-            selected_category_detail.get(
-                "total_rentals",
-                0,
-            )
-            or 0
-        ) if selected_category_detail else 0
-
-        late_rentals = int(
-            selected_category_detail.get(
-                "late_rentals",
-                0,
-            )
-            or 0
-        ) if selected_category_detail else 0
-
-        late_rate = (
-            late_rentals
-            / total_rentals
-            * 100
-            if total_rentals
-            else 0
-        )
-
-        scope_note = (
-            f"Category scope: "
-            f"{selected_category}"
-        )
-
-    else:
-
-        total_revenue = float(
-            revenue.get(
-                "total_revenue",
-                0,
-            )
-            or 0
-        )
-
-        rental_revenue = float(
-            revenue.get(
-                "rental_revenue",
-                0,
-            )
-            or 0
-        )
-
-        late_fee_revenue = float(
-            revenue.get(
-                "late_fee_revenue",
-                0,
-            )
-            or 0
-        )
-
-        late_fee_pct = float(
-            revenue.get(
-                "late_fee_contribution_pct",
-                0,
-            )
-            or 0
-        )
-
-        total_rentals = int(
-            dependency.get(
-                "total_rentals",
-                0,
-            )
-            or 0
-        )
-
-        late_rentals = int(
-            dependency.get(
-                "late_rentals",
-                0,
-            )
-            or 0
-        )
-
-        late_rate = float(
-            dependency.get(
-                "late_rate_pct",
-                0,
-            )
-            or 0
-        )
-
-        scope_note = (
-            "Full Sakila dataset"
-        )
+    scope_note = (
+        " · ".join(scope_parts)
+        if scope_parts
+        else "Full Sakila dataset"
+    )
 
     # ========================================================
     # PAGE HEADER
@@ -2327,6 +2817,8 @@ def render_overview():
         eyebrow="BI INTELLIGENCE",
         model_note=scope_note,
     )
+
+    render_data_errors()
 
     # ========================================================
     # AI ANALYST SHORTCUT
@@ -2366,131 +2858,54 @@ def render_overview():
     k1, k2, k3, k4, k5 = st.columns(5)
 
     with k1:
-
-        label = (
-            "STORE REVENUE"
-            if selected_store_row
-            else "TOTAL REVENUE"
-        )
-
         render_metric_card(
-            label,
+            "TOTAL REVENUE",
             money(total_revenue),
             badge="Observed",
-            note=scope_note,
+            note=f"{scope_note} · {payment_count:,} payments",
             primary_badge=True,
         )
 
     with k2:
-
-        label = (
-            "STORE RENTALS"
-            if selected_store_row
-            else "RENTAL REVENUE"
-        )
-
-        value = (
-            f"{total_rentals:,}"
-            if selected_store_row
-            else money(rental_revenue)
-        )
-
         render_metric_card(
-            label,
-            value,
+            "RENTAL REVENUE",
+            money(rental_revenue),
             badge="Observed",
-            note=(
-                "Rental volume returned by "
-                "the store data tool."
-                if selected_store_row
-                else "Observed base rental revenue."
-            ),
+            note="Payments up to the film rental rate.",
         )
 
     with k3:
-
         render_metric_card(
             "LATE-FEE REVENUE",
-            (
-                "—"
-                if selected_store_row
-                else money(late_fee_revenue)
-            ),
-            badge=(
-                "Not exposed by store tool"
-                if selected_store_row
-                else pct(late_fee_pct)
-            ),
-            note=(
-                "Current get_store_data() does "
-                "not expose store-level late fees."
-                if selected_store_row
-                else "Observed overdue-fee revenue."
-            ),
+            money(late_fee_revenue),
+            badge=pct(late_fee_pct),
+            note="Payment amount above the film rental rate.",
         )
 
     with k4:
-
         render_metric_card(
             "LATE-FEE CONTRIBUTION",
-            (
-                "—"
-                if selected_store_row
-                else pct(late_fee_pct)
-            ),
-            badge=(
-                "No store-level field"
-                if selected_store_row
-                else "Of selected scope"
-            ),
-            note=(
-                "Not calculated without store-level "
-                "late-fee data."
-                if selected_store_row
-                else "Late-fee share of observed revenue."
-            ),
+            pct(late_fee_pct),
+            badge="Of selected scope",
+            note="Late-fee share of observed revenue.",
         )
 
     with k5:
-
         render_metric_card(
             "LATE-RETURN RATE",
-            (
-                "—"
-                if late_rate is None
-                else pct(late_rate)
-            ),
-            badge=(
-                "No store-level field"
-                if late_rate is None
-                else f"{late_rentals:,} late rentals"
-            ),
-            note=(
-                "Current store tool does not expose "
-                "store-level late-return rate."
-                if late_rate is None
-                else f"Across {total_rentals:,} completed rentals."
-            ),
+            pct(late_rate),
+            badge=f"{late_rentals:,} late rentals",
+            note=f"Across {total_rentals:,} completed rentals.",
         )
 
     # ========================================================
     # REVENUE TREND
     # ========================================================
 
-    trend_df = load_monthly_rental_trend()
-
-    if selected_category != "All Film Categories":
-        if "category" in trend_df.columns:
-            trend_df = trend_df[
-                trend_df["category"]
-                == selected_category
-            ]
-
-    if (
-        selected_category != "All Film Categories"
-        and not trend_df.empty
-    ):
-        pass
+    trend_df = load_monthly_rental_trend(
+        selected_category_name,
+        selected_store_id,
+    )
 
     st.markdown(
         "<div style='height:14px'></div>",
@@ -2512,8 +2927,8 @@ def render_overview():
                         Revenue Trend
                     </div>
                     <div class="card-subtitle">
-                        Monthly rental revenue derived from
-                        get_rental_data().
+                        Monthly total revenue from payment.amount
+                        grouped by payment.payment_date.
                     </div>
                 </div>
                 <div class="card-body">
@@ -2521,26 +2936,11 @@ def render_overview():
             unsafe_allow_html=True,
         )
 
-        if (
-            selected_store_row
-            and not trend_df.empty
-        ):
+        if trend_df.empty:
 
             st.markdown(
                 '<div class="empty-state">'
-                'The current rental data tool does not '
-                'expose store_id, so the monthly trend '
-                'cannot be scoped to a selected store '
-                'without bypassing the backend tool layer.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-        elif trend_df.empty:
-
-            st.markdown(
-                '<div class="empty-state">'
-                'No rental-date series was returned by '
+                'No revenue series was returned by '
                 'the backend data tool.'
                 '</div>',
                 unsafe_allow_html=True,
@@ -2559,14 +2959,24 @@ def render_overview():
                     x=alt.X(
                         "month:N",
                         title=None,
+                        axis=alt.Axis(labelAngle=0),
                     ),
                     y=alt.Y(
-                        "rental_revenue:Q",
-                        title="Rental Revenue",
+                        "revenue:Q",
+                        title="Total Revenue",
                     ),
                     tooltip=[
-                        "month",
-                        "rental_revenue",
+                        alt.Tooltip("month:N", title="Month"),
+                        alt.Tooltip(
+                            "revenue:Q",
+                            title="Revenue",
+                            format="$,.2f",
+                        ),
+                        alt.Tooltip(
+                            "transaction_count:Q",
+                            title="Payments",
+                            format=",",
+                        ),
                     ],
                 )
                 .properties(
@@ -2581,10 +2991,8 @@ def render_overview():
 
             st.markdown(
                 '<div class="card-subtitle">'
-                'Note: this is rental revenue, '
-                'not total payment revenue. '
-                'The current revenue tool does not '
-                'expose payment date.'
+                f'Scope: {html.escape(scope_note)}. Sakila has no '
+                'payments between 2005-09 and 2006-01.'
                 '</div>',
                 unsafe_allow_html=True,
             )
@@ -2616,24 +3024,11 @@ def render_overview():
             unsafe_allow_html=True,
         )
 
-        if selected_store_row:
-
-            st.markdown(
-                '<div class="empty-state">'
-                'Store-level late-fee revenue is not '
-                'returned by get_store_data(), so a '
-                'store revenue mix is not fabricated.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-        else:
-
-            render_donut(
-                rental_revenue,
-                late_fee_revenue,
-                total_revenue,
-            )
+        render_donut(
+            rental_revenue,
+            late_fee_revenue,
+            total_revenue,
+        )
 
         st.markdown(
             "</div></div>",
@@ -2855,16 +3250,20 @@ def render_overview():
 
         for store in visible_stores:
 
+            location = ", ".join(
+                str(x)
+                for x in (store.get("city"), store.get("country"))
+                if x
+            )
+
             rows.append(
                 [
-                    f"Store #{store.get('store_id', '—')}",
+                    f"Store #{store.get('store_id', '—')}"
+                    + (f" · {location}" if location else ""),
                     f"{int(store.get('total_rentals', 0) or 0):,}",
-                    money(
-                        store.get(
-                            "total_revenue",
-                            0,
-                        )
-                    ),
+                    money(store.get("total_revenue", 0)),
+                    money(store.get("late_fee_revenue", 0)),
+                    pct(store.get("late_rate_pct", 0)),
                 ]
             )
 
@@ -2873,11 +3272,13 @@ def render_overview():
             render_html_table(
                 [
                     "Store",
-                    "Total Rentals",
+                    "Rentals",
                     "Total Revenue",
+                    "Late Fees",
+                    "Late Rate",
                 ],
                 rows,
-                number_columns={1, 2},
+                number_columns={1, 2, 3, 4},
             )
 
         else:
@@ -3263,6 +3664,12 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                     14, int(st.session_state.pred_duration) + 1
                 )
 
+        if not 3 <= int(st.session_state.pred_duration) <= 7:
+            st.caption(
+                "⚠ The ML models were trained on 3-7 day rentals; "
+                "other durations are extrapolations."
+            )
+
         r1, r2 = st.columns(2)
         with r1:
             st.number_input(
@@ -3295,6 +3702,11 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
         current_range = None
         if st.session_state.scenario_result:
             current_range = st.session_state.scenario_result.get("fee_range", {})
+
+        # FIX: show the DB-derived range even before the engine has run
+        # (it used to display "DB-derived - DB-derived/day").
+        if not current_range:
+            current_range = load_fee_constraints()
 
         lower_fee = current_range.get("lower_bound") if current_range else None
         upper_fee = current_range.get("upper_bound") if current_range else None
@@ -3487,7 +3899,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
 
         if all_scenarios:
             scenario_df = pd.DataFrame(all_scenarios)
-            scenario_df = scenario_df.head(8).copy()
+            scenario_df = scenario_df.head(12).copy()
             scenario_df["scenario_label"] = scenario_df.apply(
                 lambda r: (
                     f"${float(r.get('fee_per_day', 0)):.2f} @ "
@@ -3503,9 +3915,12 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                     x=alt.X("scenario_label:N", sort=None, title=None),
                     y=alt.Y("expected_total_revenue:Q", title="Expected Revenue"),
                     color=alt.Color(
-                        "policy:N",
-                        scale=alt.Scale(range=["#312E81", "#64748B"]),
-                        legend=None,
+                        "policy_type:N",
+                        scale=alt.Scale(
+                            domain=["current", "fee", "rental_duration"],
+                            range=["#94A3B8", "#312E81", "#64748B"],
+                        ),
+                        legend=alt.Legend(title=None, orient="bottom"),
                     ),
                     tooltip=[
                         "scenario_label",
@@ -3522,9 +3937,14 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             table_rows = []
             best_rank = all_scenarios[0].get("rank") if all_scenarios else None
 
-            for row in all_scenarios[:8]:
+            for row in all_scenarios[:12]:
                 is_best = row.get("rank") == best_rank
-                status = "Best" if is_best else "Scenario"
+                if is_best:
+                    status = "Best"
+                elif row.get("policy_type") == "current":
+                    status = "Current"
+                else:
+                    status = "Scenario"
                 table_rows.append(
                     [
                         f"${float(row.get('fee_per_day', 0)):.2f}/day",
@@ -3677,15 +4097,454 @@ def render_assistant_message(
             [],
         ) or []
 
+        data_check = result.get("data_check") or {}
+        unverified = data_check.get("unverified_kpis") or []
+
+        if unverified:
+            st.caption(
+                "⚠ Data check: these KPI values were not found directly "
+                "in the tool results (they may be derived or incorrect): "
+                + ", ".join(str(x) for x in unverified)
+            )
+
+        if trace and not any(
+            str(t.get("status")) == "success" for t in trace
+        ):
+            st.caption("⚠ No tool call succeeded for this answer.")
+
         st.caption(
             f"Generated {timestamp} · "
             f"{len(trace)} tool calls"
+            + (
+                f" · {result.get('model')}"
+                if result.get("model")
+                else ""
+            )
         )
 
 
 
 
-def render_ai_analyst():
+def record_activity_event(event):
+    """
+    Store an agent activity event in the session.
+
+    FIX: this function was called in the error handler of
+    render_ai_analyst() but was never defined, so every agent error
+    (e.g. an OpenRouter rate limit) crashed the page with NameError
+    instead of showing the error message.
+    """
+
+    if not isinstance(event, dict):
+        return
+
+    events = list(st.session_state.get("agent_activity_events", []) or [])
+    events.append(event)
+    st.session_state["agent_activity_events"] = events[-200:]
+
+
+def render_ai_analyst(activity_placeholder=None):
+
+
+    persisted_events = list(
+        st.session_state.get(
+            "agent_activity_events",
+            [],
+        ) or []
+    )
+
+    saved_state = st.session_state.get(
+        "agent_activity_state",
+        None,
+    )
+
+    if isinstance(
+        saved_state,
+        dict,
+    ):
+        activity_state = {
+            "status": saved_state.get(
+                "status",
+                "READY",
+            ),
+            "steps": list(
+                saved_state.get(
+                    "steps",
+                    [],
+                ) or []
+            ),
+            "mode": saved_state.get(
+                "mode",
+                None,
+            ),
+        }
+    else:
+        activity_state = {
+            "status": "READY",
+            "steps": [],
+            "mode": None,
+        }
+
+    def save_activity_state():
+        st.session_state[
+            "agent_activity_state"
+        ] = {
+            "status": activity_state.get(
+                "status",
+                "READY",
+            ),
+            "steps": list(
+                activity_state.get(
+                    "steps",
+                    [],
+                ) or []
+            ),
+            "mode": activity_state.get(
+                "mode",
+                None,
+            ),
+        }
+
+    def find_running_tool(tool_name):
+        for step in reversed(
+            activity_state["steps"]
+        ):
+            if (
+                step.get("kind") == "tool"
+                and step.get("tool") == tool_name
+                and str(
+                    step.get("status")
+                ).upper() == "RUNNING"
+            ):
+                return step
+
+        return None
+
+    def find_step(kind):
+        for step in reversed(
+            activity_state["steps"]
+        ):
+            if step.get("kind") == kind:
+                return step
+
+        return None
+
+    def add_step(
+        label,
+        status="SUCCESS",
+        detail="",
+        kind="process",
+        tool=None,
+    ):
+        activity_state["steps"].append(
+            {
+                "label": label,
+                "status": status,
+                "detail": detail,
+                "kind": kind,
+                "tool": tool,
+            }
+        )
+
+    def handle_activity_event(event):
+        if not isinstance(
+            event,
+            dict,
+        ):
+            return
+
+        event_name = str(
+            event.get(
+                "event",
+                "",
+            )
+        ).lower()
+
+        if event_name == "question_received":
+            add_step(
+                "Understanding question",
+                "RUNNING",
+                _activity_text(
+                    event.get(
+                        "question",
+                        "",
+                    )
+                ),
+                "question",
+            )
+
+        elif event_name == "mode":
+            understanding = find_step("question")
+            if understanding is not None:
+                understanding["status"] = "SUCCESS"
+            activity_state["mode"] = event.get(
+                "mode",
+                "",
+            )
+
+            add_step(
+                "Detecting analysis mode",
+                "SUCCESS",
+                f"Mode: {event.get('mode', '')}",
+                "mode",
+            )
+
+        elif event_name == "agent_decision":
+            previous_next = find_step("next_step")
+            if previous_next is not None:
+                previous_next["status"] = "SUCCESS"
+            tools = event.get(
+                "tools",
+                [],
+            ) or []
+            add_step(
+                "Selecting BI tool",
+                "RUNNING",
+                "Selected: "
+                + (
+                    ", ".join(
+                        str(x)
+                        for x in tools
+                    )
+                    or "No tool"
+                ),
+                "decision",
+            )
+
+        elif event_name == "tool_selected":
+            decision = find_step("decision")
+            if decision is not None:
+                decision["status"] = "SUCCESS"
+            tool_name = str(
+                event.get(
+                    "tool",
+                    "unknown",
+                )
+            )
+
+            input_text = _activity_text(
+                event.get(
+                    "input",
+                    {},
+                ),
+                360,
+            )
+
+            add_step(
+                tool_name,
+                "RUNNING",
+                "Input: " + input_text,
+                "tool",
+                tool_name,
+            )
+
+        elif event_name == "tool_call":
+            tool_name = str(
+                event.get(
+                    "tool",
+                    "unknown",
+                )
+            )
+
+            step = find_running_tool(
+                tool_name
+            )
+
+            if step is None:
+                add_step(
+                    tool_name,
+                    "RUNNING",
+                    "",
+                    "tool",
+                    tool_name,
+                )
+            else:
+                step["status"] = "RUNNING"
+
+        elif event_name == "tool_completed":
+            tool_name = str(
+                event.get(
+                    "tool",
+                    "unknown",
+                )
+            )
+
+            status = str(
+                event.get(
+                    "status",
+                    "success",
+                )
+            ).upper()
+
+            step = find_running_tool(
+                tool_name
+            )
+
+            if step is None:
+                add_step(
+                    tool_name,
+                    status.upper(),
+                    "",
+                    "tool",
+                    tool_name,
+                )
+            else:
+                step["status"] = status
+
+                if event.get("error"):
+                    step["detail"] = _activity_text(
+                        event.get(
+                            "error",
+                            "",
+                        ),
+                        360,
+                    )
+
+        elif event_name == "tool_output":
+            tool_name = str(
+                event.get(
+                    "tool",
+                    "unknown",
+                )
+            )
+
+            output = _activity_text(
+                event.get(
+                    "output",
+                    "",
+                ),
+                700,
+            )
+
+            add_step(
+                "BI output received",
+                "SUCCESS",
+                f"{tool_name}: {output}",
+                "output",
+                tool_name,
+            )
+
+        elif event_name == "next_step":
+            add_step(
+                "Selecting next step",
+                "RUNNING",
+                (
+                    f"Round {event.get('round', '?')} · "
+                    f"{event.get('tool_count', 0)} "
+                    f"tool result(s)"
+                ),
+                "next_step",
+            )
+
+        elif event_name == "synthesis_started":
+            previous_next = find_step("next_step")
+            if previous_next is not None:
+                previous_next["status"] = "SUCCESS"
+            add_step(
+                "Synthesizing answer",
+                "RUNNING",
+                (
+                    f"{event.get('tool_count', 0)} "
+                    f"tool call(s) · "
+                    f"{event.get('rounds', 0)} round(s)"
+                ),
+                "synthesis",
+            )
+
+        elif event_name == "answer_ready":
+            synthesis = find_step(
+                "synthesis"
+            )
+
+            if synthesis is not None:
+                synthesis["status"] = "SUCCESS"
+
+            sections = []
+
+            if event.get("has_kpis"):
+                sections.append("KPI")
+
+            if event.get("has_visualizations"):
+                sections.append("Visualization")
+
+            if event.get("has_tables"):
+                sections.append("Table")
+
+            if event.get("has_insights"):
+                sections.append("Insights")
+
+            add_step(
+                "Answer ready",
+                "SUCCESS",
+                (
+                    "Prepared: "
+                    + ", ".join(sections)
+                    if sections
+                    else "Answer prepared"
+                ),
+                "answer",
+            )
+
+        elif event_name == "llm_retry":
+            add_step(
+                "Retrying model call",
+                "RUNNING",
+                _activity_text(
+                    f"{event.get('model', '')} · attempt "
+                    f"{event.get('attempt', '?')} · "
+                    f"{event.get('error', '')}",
+                    360,
+                ),
+                "retry",
+            )
+
+        elif event_name == "completed":
+            activity_state["status"] = "COMPLETED"
+            for step in activity_state["steps"]:
+                if str(step.get("status")).upper() == "RUNNING":
+                    step["status"] = "SUCCESS"
+
+        elif event_name == "error":
+            add_step(
+                "Agent error",
+                "ERROR",
+                _activity_text(
+                    event.get(
+                        "error",
+                        "",
+                    ),
+                    360,
+                ),
+                "error",
+            )
+
+            activity_state["status"] = "ERROR"
+
+        if event_name not in {
+            "completed",
+            "error",
+        }:
+            activity_state["status"] = "RUNNING"
+
+        save_activity_state()
+
+        if activity_placeholder is not None:
+            render_live_agent_activity(
+                activity_placeholder,
+                activity_state,
+            )
+
+    def activity_callback(event):
+        record_activity_event(event)
+        handle_activity_event(
+            event
+        )
+
+    if activity_placeholder is not None:
+        render_live_agent_activity(
+            activity_placeholder,
+            activity_state,
+        )
 
     # ========================================================
     # PROCESS NEW QUESTION FIRST
@@ -3706,10 +4565,44 @@ def render_ai_analyst():
         question = pending
 
     if question:
+        activity_state = {
+            "status": "RUNNING",
+            "steps": [],
+            "mode": None,
+        }
+
+        st.session_state[
+            "agent_activity_state"
+        ] = activity_state
+
+        if activity_placeholder is not None:
+            render_live_agent_activity(
+                activity_placeholder,
+                activity_state,
+            )
+
+        activity_state["status"] = "RUNNING"
+        activity_state["steps"] = []
+        activity_state["mode"] = None
+        activity_state["events"] = []
+
+        st.session_state[
+            "agent_activity_events"
+        ] = []
+
+        if activity_placeholder is not None:
+            render_live_agent_activity(
+                activity_placeholder,
+                activity_state,
+            )
+
 
         timestamp = datetime.now().strftime(
             "%H:%M"
         )
+
+        # Previous turns, so follow-up questions keep their context.
+        chat_history = list(st.session_state.messages)
 
         # User message
         st.session_state.messages.append(
@@ -3724,11 +4617,33 @@ def render_ai_analyst():
         try:
 
             with st.spinner(
-                "Claude is analyzing Sakila data..."
+                "AI Agent is analyzing Sakila data..."
             ):
 
+                activity_state["status"] = "RUNNING"
+
+                render_live_agent_activity(
+                    activity_placeholder,
+                    activity_state,
+                )
+
                 result = ask_claude(
-                    question
+                    question,
+                    activity_callback=activity_callback,
+                    history=chat_history,
+                )
+
+                activity_state["status"] = (
+                    "ERROR"
+                    if isinstance(result, dict) and result.get("error")
+                    else "COMPLETED"
+                )
+
+                save_activity_state()
+
+                render_live_agent_activity(
+                    activity_placeholder,
+                    activity_state,
                 )
 
             if not isinstance(
@@ -3745,6 +4660,27 @@ def render_ai_analyst():
                 }
 
         except Exception as exc:
+
+            activity_state["status"] = "ERROR"
+            handle_activity_event(
+                {
+                    "event": "error",
+                    "error": str(exc),
+                }
+            )
+
+            record_activity_event(
+                {
+                    "event": "error",
+                    "error": str(exc),
+                }
+            )
+
+
+            render_live_agent_activity(
+                activity_placeholder,
+                activity_state,
+            )
 
             result = {
                 "answer": (
@@ -3784,12 +4720,12 @@ def render_ai_analyst():
         "AI Analyst",
         (
             "Ask questions in natural language. "
-            "Claude chooses and executes the "
+            "The AI agent chooses and executes the "
             "appropriate backend tools automatically."
         ),
         eyebrow="AUTONOMOUS BI ANALYST",
         model_note=(
-            "ask_claude() · actual tool calling"
+            f"{get_model_label()} · actual tool calling"
         ),
     )
 
@@ -3907,13 +4843,8 @@ def render_ai_analyst():
     # MAIN WORKSPACE
     # ========================================================
 
-    chat_col, activity_col = st.columns(
-        [1.8, 0.8],
-        gap="large",
-    )
-
-
-    # ========================================================
+    chat_col = st.container()
+# ========================================================
     # LEFT: CHAT
     # ========================================================
 
@@ -3996,46 +4927,6 @@ def render_ai_analyst():
 
 
     # ========================================================
-    # RIGHT: ACTUAL AGENT ACTIVITY
-    # ========================================================
-
-    with activity_col:
-
-        latest_trace = []
-
-        for message in reversed(
-            st.session_state.messages
-        ):
-
-            if (
-                message.get("role")
-                == "assistant"
-            ):
-
-                content = message.get(
-                    "content"
-                )
-
-                if isinstance(
-                    content,
-                    dict,
-                ):
-
-                    latest_trace = (
-                        content.get(
-                            "tool_trace",
-                            [],
-                        )
-                        or []
-                    )
-
-                break
-
-        render_agent_activity(
-            latest_trace
-        )
-
-
 
 # ============================================================
 # ROUTING
@@ -4046,7 +4937,7 @@ page = st.query_params.get("page", "overview")
 if page not in {"overview", "predictions", "analyst"}:
     page = "overview"
 
-render_sidebar(page)
+activity_placeholder = render_sidebar(page)
 render_top_header()
 
 if page == "overview":
@@ -4056,4 +4947,4 @@ elif page == "predictions":
     render_predictions()
 
 else:
-    render_ai_analyst()
+    render_ai_analyst(activity_placeholder)

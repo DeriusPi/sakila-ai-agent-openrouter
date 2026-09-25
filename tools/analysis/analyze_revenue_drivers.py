@@ -1,169 +1,168 @@
-from tools.data.get_revenue_data import get_revenue_data
-from tools.data.get_rental_data import get_rental_data
+from decimal import Decimal
+
+from db import get_connection
+
+from tools.data.business_metrics import (
+    LATE_CONDITION_SQL,
+    LATE_DAYS_SQL,
+    LATE_FEE_SQL,
+    pct,
+    to_number,
+)
+
+
+def _fetch_all(query):
+    conn = get_connection()
+    try:
+        with conn.cursor(dictionary=True) as cursor:
+            cursor.execute(query)
+            return cursor.fetchall()
+    finally:
+        conn.close()
 
 
 def analyze_revenue_drivers():
     """
-    Analyze factors associated with late-fee revenue.
+    Late-fee revenue drivers by category, rental duration and rental
+    rate, plus the late-days distribution.
 
-    Dimensions:
-        - category
-        - rental duration
-        - rental rate
+    Every dimension returns (same keys as before, plus new ones):
+        dimension, transactions, late_fee_revenue, avg_late_fee,
+        total_revenue, completed_rentals, late_rentals, late_rate_pct
+
+    FIX:
+      - computed in SQL (no Python loops over 16k raw rows)
+      - adds late-return rate per dimension, so "why" questions can be
+        answered from one tool
+      - late_days_distribution now separates on-time rentals from
+        rentals that were late by less than one day (both were lumped
+        into bucket 0 before, 9,458 rows).
     """
 
-    revenue_data = get_revenue_data()
-    rental_data = get_rental_data()
+    revenue_sql = """
+        SELECT
+            {dim} AS dimension,
+            COUNT(p.payment_id) AS transactions,
+            SUM(p.amount) AS total_revenue,
+            SUM({late_fee}) AS late_fee_revenue
+        FROM payment p
+        JOIN rental r ON p.rental_id = r.rental_id
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        JOIN film_category fc ON f.film_id = fc.film_id
+        JOIN category c ON fc.category_id = c.category_id
+        GROUP BY {dim}
+    """
 
-    category_stats = {}
-    duration_stats = {}
-    rate_stats = {}
+    late_sql = """
+        SELECT
+            {dim} AS dimension,
+            COUNT(*) AS completed_rentals,
+            SUM(CASE WHEN {late} THEN 1 ELSE 0 END) AS late_rentals,
+            AVG(CASE WHEN {late} THEN {late_days} END) AS avg_late_days
+        FROM rental r
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        JOIN film_category fc ON f.film_id = fc.film_id
+        JOIN category c ON fc.category_id = c.category_id
+        WHERE r.return_date IS NOT NULL
+        GROUP BY {dim}
+    """
 
-    # -------------------------
-    # Revenue drivers
-    # -------------------------
-
-    for row in revenue_data:
-
-        category = row["category"]
-        duration = int(row["rental_duration"])
-        rate = float(row["rental_rate"])
-
-        amount = float(row["amount"])
-        rental_rate = float(row["rental_rate"])
-
-        late_fee = max(
-            amount - rental_rate,
-            0
+    def dimension_stats(dim):
+        revenue_rows = _fetch_all(
+            revenue_sql.format(dim=dim, late_fee=LATE_FEE_SQL)
+        )
+        late_rows = _fetch_all(
+            late_sql.format(
+                dim=dim, late=LATE_CONDITION_SQL, late_days=LATE_DAYS_SQL
+            )
         )
 
-        # Category
-        if category not in category_stats:
-            category_stats[category] = {
-                "transactions": 0,
-                "late_fee_revenue": 0.0,
-            }
+        def key(value):
+            return float(value) if isinstance(value, Decimal) else value
 
-        category_stats[category]["transactions"] += 1
-        category_stats[category][
-            "late_fee_revenue"
-        ] += late_fee
-
-        # Duration
-        if duration not in duration_stats:
-            duration_stats[duration] = {
-                "transactions": 0,
-                "late_fee_revenue": 0.0,
-            }
-
-        duration_stats[duration]["transactions"] += 1
-        duration_stats[duration][
-            "late_fee_revenue"
-        ] += late_fee
-
-        # Rental rate
-        if rate not in rate_stats:
-            rate_stats[rate] = {
-                "transactions": 0,
-                "late_fee_revenue": 0.0,
-            }
-
-        rate_stats[rate]["transactions"] += 1
-        rate_stats[rate][
-            "late_fee_revenue"
-        ] += late_fee
-
-    # -------------------------
-    # Late-return behavior
-    # -------------------------
-
-    late_days_distribution = {}
-
-    for row in rental_data:
-
-        actual_days = (
-            row["return_date"] -
-            row["rental_date"]
-        ).total_seconds() / 86400
-
-        duration = float(
-            row["rental_duration"]
-        )
-
-        late_days = max(
-            actual_days - duration,
-            0
-        )
-
-        late_day_bucket = int(late_days)
-
-        if late_day_bucket not in late_days_distribution:
-            late_days_distribution[
-                late_day_bucket
-            ] = 0
-
-        late_days_distribution[
-            late_day_bucket
-        ] += 1
-
-    def sort_stats(stats):
+        late_map = {key(r["dimension"]): r for r in late_rows}
 
         result = []
 
-        for key, values in stats.items():
+        for row in revenue_rows:
+            dimension = key(row["dimension"])
+            transactions = int(row["transactions"] or 0)
+            late_fee = to_number(row["late_fee_revenue"])
+            late_row = late_map.get(dimension, {})
+            completed = int(late_row.get("completed_rentals") or 0)
+            late = int(late_row.get("late_rentals") or 0)
 
             result.append({
-                "dimension": key,
-                "transactions": values["transactions"],
-                "late_fee_revenue": round(
-                    values["late_fee_revenue"],
-                    2
+                "dimension": dimension,
+                "transactions": transactions,
+                "total_revenue": to_number(row["total_revenue"]),
+                "late_fee_revenue": late_fee,
+                "avg_late_fee": (
+                    round(late_fee / transactions, 2)
+                    if transactions else 0.0
                 ),
-                "avg_late_fee": round(
-                    values["late_fee_revenue"]
-                    / values["transactions"],
-                    2
-                )
+                "completed_rentals": completed,
+                "late_rentals": late,
+                "late_rate_pct": pct(late, completed),
+                "avg_late_days_when_late": to_number(
+                    late_row.get("avg_late_days")
+                ),
             })
 
-        result.sort(
-            key=lambda x: x["late_fee_revenue"],
-            reverse=True
-        )
+        result.sort(key=lambda x: x["late_fee_revenue"], reverse=True)
 
         return result
 
+    distribution_rows = _fetch_all(
+        f"""
+        SELECT
+            CASE
+                WHEN NOT ({LATE_CONDITION_SQL}) THEN 'on_time'
+                ELSE CAST(FLOOR({LATE_DAYS_SQL}) AS CHAR)
+            END AS bucket,
+            COUNT(*) AS rentals
+        FROM rental r
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        WHERE r.return_date IS NOT NULL
+        GROUP BY bucket
+        """
+    )
+
+    distribution = {"on_time": 0}
+    late_buckets = {}
+
+    for row in distribution_rows:
+        bucket = str(row["bucket"])
+        if bucket == "on_time":
+            distribution["on_time"] = int(row["rentals"])
+        else:
+            days = int(float(bucket))
+            label = f"late_{days}_to_{days + 1}_days"
+            late_buckets[days] = (label, int(row["rentals"]))
+
+    for days in sorted(late_buckets):
+        label, count = late_buckets[days]
+        distribution[label] = count
+
     return {
-        "category": sort_stats(category_stats),
-        "rental_duration": sort_stats(
-            duration_stats
-        ),
-        "rental_rate": sort_stats(rate_stats),
-        "late_days_distribution": dict(
-            sorted(late_days_distribution.items())
-        ),
+        "category": dimension_stats("c.name"),
+        "rental_duration": dimension_stats("f.rental_duration"),
+        "rental_rate": dimension_stats("f.rental_rate"),
+        "late_days_distribution": distribution,
+        "definitions": {
+            "late_fee": "GREATEST(payment.amount - film.rental_rate, 0)",
+            "late_rental": (
+                "return_date > rental_date + rental_duration days"
+            ),
+        },
     }
 
 
 if __name__ == "__main__":
+    import json
 
     result = analyze_revenue_drivers()
-
-    print("=" * 40)
-    print("REVENUE DRIVERS")
-    print("=" * 40)
-
-    print("\nCategory:")
-    for x in result["category"][:5]:
-        print(x)
-
-    print("\nRental duration:")
-    for x in result["rental_duration"]:
-        print(x)
-
-    print("\nRental rate:")
-    for x in result["rental_rate"]:
-        print(x)
-
-    print("\nLate days distribution:")
-    print(result["late_days_distribution"])
+    print(json.dumps(result, indent=2)[:4000])

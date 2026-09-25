@@ -1,9 +1,9 @@
-import joblib
-import os
 import pandas as pd
 
+from tools.ml._inputs import load_model, normalize_ml_inputs
 
-MODEL_PATH = "ml/models/late_probability.pkl"
+
+MODEL_FILE = "late_probability.pkl"
 
 
 def predict_late_probability(
@@ -14,31 +14,31 @@ def predict_late_probability(
 ):
     """
     Predict probability that a rental will be returned late.
+
+    customer_late_rate must be a ratio 0-1 (0.512). Percentages such as
+    51.2 are converted automatically; category names are normalised
+    ('sports' -> 'Sports').
     """
 
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"Model not found: {MODEL_PATH}"
-        )
+    inputs, warnings = normalize_ml_inputs(
+        customer_late_rate,
+        category,
+        rental_duration,
+        rental_rate,
+    )
 
-    model = joblib.load(MODEL_PATH)
+    model = load_model(MODEL_FILE)
 
     input_data = pd.DataFrame([
         {
-            "rental_duration": float(rental_duration),
-            "rental_rate": float(rental_rate),
-            "category": category,
-            "customer_late_rate": float(
-                customer_late_rate
-            )
+            "rental_duration": inputs["rental_duration"],
+            "rental_rate": inputs["rental_rate"],
+            "category": inputs["category"],
+            "customer_late_rate": inputs["customer_late_rate"],
         }
     ])
 
-    probability = model.predict_proba(
-        input_data
-    )[0][1]
-
-    probability = float(probability)
+    probability = float(model.predict_proba(input_data)[0][1])
 
     if probability >= 0.70:
         risk_level = "HIGH"
@@ -47,16 +47,14 @@ def predict_late_probability(
     else:
         risk_level = "LOW"
 
-    return {
-        "late_probability": round(
-            probability,
-            4
-        ),
-        "late_probability_pct": round(
-            probability * 100,
-            2
-        ),
-        "risk_level": risk_level
+    result = {
+        "late_probability": round(probability, 4),
+        "late_probability_pct": round(probability * 100, 2),
+        "risk_level": risk_level,
+        "inputs_used": inputs,
     }
 
+    if warnings:
+        result["warnings"] = warnings
 
+    return result

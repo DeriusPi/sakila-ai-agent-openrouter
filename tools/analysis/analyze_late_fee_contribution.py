@@ -8,44 +8,40 @@ def analyze_late_fee_contribution():
 
     data = get_revenue_data()
 
-    total_rental_revenue = 0.0
+    total_revenue = 0.0
     total_late_fee_revenue = 0.0
-
     categories = {}
 
     for row in data:
         category = row["category"]
-
         amount = float(row["amount"])
         rental_rate = float(row["rental_rate"])
 
         late_fee = max(amount - rental_rate, 0)
+        rental_revenue = amount - late_fee
 
-        total_rental_revenue += rental_rate
+        total_revenue += amount
         total_late_fee_revenue += late_fee
 
         if category not in categories:
             categories[category] = {
                 "rental_revenue": 0.0,
                 "late_fee_revenue": 0.0,
+                "total_revenue": 0.0,
             }
 
-        categories[category]["rental_revenue"] += rental_rate
+        categories[category]["rental_revenue"] += rental_revenue
         categories[category]["late_fee_revenue"] += late_fee
+        categories[category]["total_revenue"] += amount
 
-    total_revenue = (
-        total_rental_revenue +
-        total_late_fee_revenue
+    total_rental_revenue = (
+        total_revenue - total_late_fee_revenue
     )
 
     category_results = []
 
     for category, values in categories.items():
-
-        category_total = (
-            values["rental_revenue"] +
-            values["late_fee_revenue"]
-        )
+        category_total = values["total_revenue"]
 
         if category_total > 0:
             contribution_pct = (
