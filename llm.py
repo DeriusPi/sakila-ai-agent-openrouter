@@ -365,6 +365,13 @@ The Streamlit app renders KPI cards, charts, tables, insights.
 - KPI cards: the 1-4 most important numbers
 Only visualize data that exists in the tool results. Preserve all rows
 when the user asks for a full breakdown (e.g. all 16 categories).
+- Time periods (months, weeks, quarters, dates) are ALWAYS listed in
+  chronological order (oldest -> newest), never ranked by value. Use the
+  period label from the tool (e.g. "2005-05") as the x value.
+- Categories / stores / scenarios may be ranked from largest to smallest.
+- For KPI values prefer numbers the tools already return (for example
+  late_fee_contribution_pct, revenue_share_pct, late_rate_pct) instead
+  of computing your own ratios.
 
 ============================================================
 FINAL RESPONSE FORMAT
@@ -913,16 +920,65 @@ def check_kpis_against_tools(kpis, tool_results):
         if re.search(r"\d\s*[mM]\b", raw):
             candidates.add(value * 1_000_000)
 
+        # Half a unit of the last displayed digit ("30.2%" -> 0.05) so a
+        # correctly rounded value is accepted.
+        decimals = len(found[0].split(".")[1]) if "." in found[0] else 0
+        display_tolerance = 0.5 * 10 ** (-decimals) + 1e-9
+
         def matches(c):
             tolerance = max(0.011, abs(c) * 0.0005)
             if re.search(r"\d\s*[kKmM]\b", raw):
                 tolerance = max(tolerance, abs(c) * 0.01)
             return any(abs(c - n) <= tolerance for n in numbers)
 
-        if not any(matches(c) for c in candidates):
-            unverified.append(kpi.get("label", raw))
+        if any(matches(c) for c in candidates):
+            continue
+
+        # FIX: a ratio / share / difference the model computed itself from
+        # two tool numbers (e.g. late fees / revenue = 30.2%) is correct
+        # and should not be flagged.
+        if _is_derived_from(value, numbers, kpi, display_tolerance):
+            continue
+
+        unverified.append(kpi.get("label", raw))
 
     return unverified
+
+
+def _is_derived_from(value, numbers, kpi, display_tolerance):
+    """
+    True if `value` equals a/b, a/b*100, a-b or a+b where a and b are
+    numbers quoted in the KPI's own description (e.g. "20,195.00 /
+    66,892.38") AND both of them appear in the tool results. Searching all
+    tool numbers pairwise would "verify" almost any value, so only the
+    numbers the model cites as its inputs are used.
+    """
+
+    text = " ".join(
+        str(v) for k, v in kpi.items() if k != "value" and v is not None
+    )
+    quoted = []
+    for x in re.findall(r"\d[\d,]*\.?\d*", text):
+        try:
+            q = float(x.replace(",", "").rstrip("."))
+        except ValueError:
+            continue
+        if any(abs(q - n) <= max(0.011, abs(q) * 0.0005) for n in numbers):
+            quoted.append(q)
+
+    tolerance = max(display_tolerance, abs(value) * 0.0005)
+
+    for i, a in enumerate(quoted):
+        for j, b in enumerate(quoted):
+            if i == j:
+                continue
+            derived = [a - b, a + b]
+            if b:
+                derived += [a / b, a / b * 100]
+            if any(abs(value - d) <= tolerance for d in derived):
+                return True
+
+    return False
 
 
 # ============================================================
