@@ -3,12 +3,15 @@ from db import get_connection
 from tools.data.business_metrics import (
     LATE_CONDITION_SQL,
     LATE_FEE_SQL,
+    build_scope_filters,
+    normalize_category,
+    normalize_date,
     pct,
     to_number,
 )
 
 
-def get_store_data():
+def get_store_data(category=None, start_date=None, end_date=None):
     """
     Store-level rental, late-return and revenue statistics.
 
@@ -23,7 +26,35 @@ def get_store_data():
       - adds rental revenue, late-fee revenue, late-return rate and
         store location so the dashboard no longer has to show "—"
         for store-level late fees.
+
+    Optional filters: category, start_date, end_date (YYYY-MM-DD, YYYY-MM
+    or YYYY). Revenue is filtered by payment.payment_date and rentals /
+    late returns by rental.rental_date (same rule as get_business_kpis).
     """
+
+    category = normalize_category(category)
+    start_date = normalize_date(start_date)
+    end_date = normalize_date(end_date, is_end=True)
+
+    rent_clauses, rent_params = build_scope_filters(
+        category, None, start_date, end_date, date_column="r.rental_date",
+    )
+    rev_clauses, rev_params = build_scope_filters(
+        category, None, start_date, end_date, date_column="p.payment_date",
+    )
+
+    category_join = (
+        "JOIN film_category fc ON f.film_id = fc.film_id "
+        "JOIN category c ON fc.category_id = c.category_id"
+        if category else ""
+    )
+    rental_filter = (
+        "WHERE " + " AND ".join(rent_clauses) if rent_clauses else ""
+    )
+    revenue_filter = (
+        "WHERE " + " AND ".join(rev_clauses) if rev_clauses else ""
+    )
+    params = rent_params + rev_params
 
     # Derived tables (no CTE) so the query also runs on MySQL 5.7.
     query = f"""
@@ -55,6 +86,8 @@ def get_store_data():
             FROM rental r
             JOIN inventory i ON r.inventory_id = i.inventory_id
             JOIN film f ON i.film_id = f.film_id
+            {category_join}
+            {rental_filter}
             GROUP BY i.store_id
         ) AS rentals ON s.store_id = rentals.store_id
         LEFT JOIN (
@@ -67,6 +100,8 @@ def get_store_data():
             JOIN rental r ON p.rental_id = r.rental_id
             JOIN inventory i ON r.inventory_id = i.inventory_id
             JOIN film f ON i.film_id = f.film_id
+            {category_join}
+            {revenue_filter}
             GROUP BY i.store_id
         ) AS revenue ON s.store_id = revenue.store_id
         LEFT JOIN (
@@ -81,7 +116,7 @@ def get_store_data():
 
     try:
         with conn.cursor(dictionary=True) as cursor:
-            cursor.execute(query)
+            cursor.execute(query, params)
             rows = cursor.fetchall()
     finally:
         conn.close()

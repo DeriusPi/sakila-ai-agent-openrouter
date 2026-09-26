@@ -311,12 +311,16 @@ TOOL_DEFINITIONS = [
         "description": (
             "All 16 categories with completed rentals, late rentals, "
             "late-return rate %, total revenue, rental revenue, late-fee "
-            "revenue and late-fee contribution %. Optional store_id filter."
+            "revenue and late-fee contribution %. Optional store_id and "
+            "start_date / end_date filters (revenue by payment date, "
+            "rentals by rental date)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "store_id": _FILTER_PROPERTIES["store_id"],
+                "start_date": _FILTER_PROPERTIES["start_date"],
+                "end_date": _FILTER_PROPERTIES["end_date"],
             },
             "required": [],
         },
@@ -327,9 +331,18 @@ TOOL_DEFINITIONS = [
         "description": (
             "Both stores (physical store of the rented copy): city, "
             "rentals, late rentals, late-return rate, total/rental/"
-            "late-fee revenue, revenue share and inventory size."
+            "late-fee revenue, revenue share and inventory size. Optional "
+            "category and start_date / end_date filters."
         ),
-        "input_schema": _no_args(),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": _FILTER_PROPERTIES["category"],
+                "start_date": _FILTER_PROPERTIES["start_date"],
+                "end_date": _FILTER_PROPERTIES["end_date"],
+            },
+            "required": [],
+        },
     },
 
     {

@@ -3,13 +3,15 @@ from db import get_connection
 from tools.data.business_metrics import (
     LATE_CONDITION_SQL,
     LATE_FEE_SQL,
+    build_scope_filters,
+    normalize_date,
     normalize_store_id,
     pct,
     to_number,
 )
 
 
-def get_category_data(store_id=None):
+def get_category_data(store_id=None, start_date=None, end_date=None):
     """
     Category-level rental, late-return and revenue statistics.
 
@@ -21,29 +23,47 @@ def get_category_data(store_id=None):
 
     Numbers are returned as int/float (not Decimal strings).
 
+    Optional filters: store_id, start_date, end_date (YYYY-MM-DD,
+    YYYY-MM or YYYY). As in get_business_kpis, revenue is filtered by
+    payment.payment_date and rentals / late returns by rental.rental_date.
+
     Returns one row per category (16 rows), sorted by total_rentals.
     """
 
     store_id = normalize_store_id(store_id)
+    start_date = normalize_date(start_date)
+    end_date = normalize_date(end_date, is_end=True)
 
-    store_filter = ""
-    params = []
+    rent_clauses, rent_params = build_scope_filters(
+        None, store_id, start_date, end_date, date_column="r.rental_date",
+    )
+    rev_clauses, rev_params = build_scope_filters(
+        None, store_id, start_date, end_date, date_column="p.payment_date",
+    )
 
-    if store_id is not None:
-        store_filter = "WHERE i.store_id = %s"
-        params = [store_id, store_id]
+    rental_filter = (
+        "WHERE " + " AND ".join(rent_clauses) if rent_clauses else ""
+    )
+    revenue_filter = (
+        "WHERE " + " AND ".join(rev_clauses) if rev_clauses else ""
+    )
+    params = rent_params + rev_params
 
     # Derived tables (no CTE) so the query also runs on MySQL 5.7.
     query = f"""
         SELECT
-            rentals.*,
+            cat.category_id,
+            cat.name AS category,
+            COALESCE(rentals.all_rentals, 0) AS all_rentals,
+            COALESCE(rentals.total_rentals, 0) AS total_rentals,
+            COALESCE(rentals.late_rentals, 0) AS late_rentals,
             COALESCE(revenue.payment_count, 0) AS payment_count,
             COALESCE(revenue.total_revenue, 0) AS total_revenue,
             COALESCE(revenue.late_fee_revenue, 0) AS late_fee_revenue
-        FROM (
+        FROM category cat
+        LEFT JOIN (
             SELECT
                 c.category_id,
-                c.name AS category,
                 COUNT(*) AS all_rentals,
                 SUM(r.return_date IS NOT NULL) AS total_rentals,
                 SUM(
@@ -56,9 +76,9 @@ def get_category_data(store_id=None):
             JOIN film f ON fc.film_id = f.film_id
             JOIN inventory i ON f.film_id = i.film_id
             JOIN rental r ON i.inventory_id = r.inventory_id
-            {store_filter}
-            GROUP BY c.category_id, c.name
-        ) AS rentals
+            {rental_filter}
+            GROUP BY c.category_id
+        ) AS rentals ON cat.category_id = rentals.category_id
         LEFT JOIN (
             SELECT
                 fc.category_id,
@@ -70,11 +90,10 @@ def get_category_data(store_id=None):
             JOIN inventory i ON r.inventory_id = i.inventory_id
             JOIN film f ON i.film_id = f.film_id
             JOIN film_category fc ON f.film_id = fc.film_id
-            {store_filter}
+            {revenue_filter}
             GROUP BY fc.category_id
-        ) AS revenue
-            ON rentals.category_id = revenue.category_id
-        ORDER BY rentals.total_rentals DESC
+        ) AS revenue ON cat.category_id = revenue.category_id
+        ORDER BY total_rentals DESC, category
     """
 
     conn = get_connection()

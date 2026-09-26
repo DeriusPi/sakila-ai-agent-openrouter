@@ -1203,10 +1203,11 @@ def load_overview_data():
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_scope_kpis(category=None, store_id=None):
+def load_scope_kpis(category=None, store_id=None, start_date=None, end_date=None):
     """
     KPIs for any Overview scope (all / one category / one store /
-    category + store) from ONE consistent SQL tool.
+    category + store, optionally for one time period) from ONE
+    consistent SQL tool.
     """
 
     result = safe_call(
@@ -1214,18 +1215,96 @@ def load_scope_kpis(category=None, store_id=None):
         {},
         category=category,
         store_id=store_id,
+        start_date=start_date,
+        end_date=end_date,
     )
 
     return result if isinstance(result, dict) else {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_category_rows(store_id=None):
-    """Category revenue / late-fee rows, optionally for one store."""
+def load_category_rows(store_id=None, start_date=None, end_date=None):
+    """Category revenue / late-fee rows for the selected store / period."""
 
-    result = safe_call(get_category_data, [], store_id=store_id)
+    result = safe_call(
+        get_category_data,
+        [],
+        store_id=store_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     return result if isinstance(result, list) else []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_store_rows(category=None, start_date=None, end_date=None):
+    """Store rows for the selected category / period."""
+
+    result = safe_call(
+        get_store_data,
+        [],
+        category=category,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    return result if isinstance(result, list) else []
+
+
+ALL_TIME_LABEL = "All Time"
+
+_MONTH_ABBR = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_period_options():
+    """
+    Time-slicer options built from the months that actually have
+    payments in the database:
+        All Time / Year 2005 / Year 2006 / May 2005 / ... / Feb 2006
+    Each label maps to (start_date, end_date) accepted by the tools.
+    """
+
+    result = safe_call(get_revenue_by_time, {}, group_by="month")
+
+    months = sorted(
+        str(row.get("group"))
+        for row in (
+            result.get("grouped_revenue", [])
+            if isinstance(result, dict)
+            else []
+        )
+        if re.fullmatch(r"\d{4}-\d{2}", str(row.get("group", "")))
+    )
+
+    options = {ALL_TIME_LABEL: (None, None)}
+
+    for year in sorted({m[:4] for m in months}):
+        options[f"Year {year}"] = (year, year)
+
+    for month in months:
+        year, mm = month.split("-")
+        options[f"{_MONTH_ABBR[int(mm) - 1]} {year}"] = (month, month)
+
+    return options
+
+
+def get_selected_period():
+    """(label, start_date, end_date) of the Time Period slicer."""
+
+    options = load_period_options()
+    label = st.session_state.get("overview_period", ALL_TIME_LABEL)
+
+    if label not in options:
+        label = ALL_TIME_LABEL
+
+    start_date, end_date = options.get(label, (None, None))
+
+    return label, start_date, end_date
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1320,18 +1399,27 @@ if "overview_category" not in st.session_state:
 if "overview_store" not in st.session_state:
     st.session_state.overview_store = "All Stores"
 
+if "overview_period" not in st.session_state:
+    st.session_state.overview_period = "All Time"
+
 
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_monthly_rental_trend(category=None, store_id=None):
+def load_monthly_rental_trend(
+    category=None,
+    store_id=None,
+    start_date=None,
+    end_date=None,
+    group_by="month",
+):
 
     result = safe_call(
         get_revenue_by_time,
         {},
-        start_date="2005-05-01",
-        end_date="2006-02-28",
-        group_by="month",
+        start_date=start_date or "2005-05-01",
+        end_date=end_date or "2006-02-28",
+        group_by=group_by,
         category=category,
         store_id=store_id,
     )
@@ -1490,8 +1578,13 @@ def render_top_header():
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3, c4 = st.columns(
-        [3.0, 2.4, 2.8, 0.55],
+    period_options = list(load_period_options().keys())
+
+    if st.session_state.get("overview_period") not in period_options:
+        st.session_state.overview_period = ALL_TIME_LABEL
+
+    c1, c2, c_time, c3, c4 = st.columns(
+        [2.6, 2.0, 2.0, 2.4, 0.55],
         gap="small",
     )
 
@@ -1527,6 +1620,27 @@ def render_top_header():
             label_visibility="collapsed",
         )
 
+    with c_time:
+
+        st.markdown(
+            '<div class="top-control-label">'
+            'Time Period'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.selectbox(
+            "Time Period",
+            period_options,
+            key="overview_period",
+            label_visibility="collapsed",
+            help=(
+                "Revenue is filtered by payment date, rentals and late "
+                "returns by rental date. Sakila only has data for "
+                "May-Aug 2005 and Feb 2006."
+            ),
+        )
+
     with c3:
 
         st.markdown(
@@ -1554,9 +1668,20 @@ def render_top_header():
                 f" · {selected_store}"
             )
 
+        selected_period = st.session_state.get(
+            "overview_period", ALL_TIME_LABEL
+        )
+
+        if selected_period != ALL_TIME_LABEL:
+            scope_text = (
+                selected_period
+                if scope_text == "Full Sakila dataset"
+                else f"{scope_text} · {selected_period}"
+            )
+
         st.markdown(
             f'<div class="data-scope-chip">'
-            f'{scope_text}'
+            f'{html.escape(scope_text)}'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -2851,13 +2976,8 @@ def render_overview():
         {}
     ) or {}
 
-    stores = data.get(
-        "stores",
-        []
-    ) or []
-
     # ========================================================
-    # SCOPE (category and/or store)
+    # SCOPE (category and/or store and/or time period)
     # ========================================================
     #
     # FIX: all KPIs now come from get_business_kpis() for the selected
@@ -2885,14 +3005,29 @@ def render_overview():
         except Exception:
             selected_store_id = None
 
+    period_label, period_start, period_end = get_selected_period()
+
     scope_kpis = load_scope_kpis(
         selected_category_name,
         selected_store_id,
+        period_start,
+        period_end,
     )
 
-    # Category rows for the category panels (store-scoped when a store
-    # is selected, so the panels match the KPI cards).
-    category_rows = load_category_rows(selected_store_id)
+    # Category rows for the category panels (store- and period-scoped,
+    # so the panels match the KPI cards).
+    category_rows = load_category_rows(
+        selected_store_id,
+        period_start,
+        period_end,
+    )
+
+    # Store rows for the store panel (category- and period-scoped).
+    stores = load_store_rows(
+        selected_category_name,
+        period_start,
+        period_end,
+    )
 
     selected_category_row = None
 
@@ -2931,6 +3066,9 @@ def render_overview():
 
     if selected_category_name:
         scope_parts.append(f"Category: {selected_category_name}")
+
+    if period_start or period_end:
+        scope_parts.append(period_label)
 
     scope_note = (
         " · ".join(scope_parts)
@@ -3027,16 +3165,31 @@ def render_overview():
             "LATE-RETURN RATE",
             pct(late_rate),
             badge=f"{late_rentals:,} late rentals",
-            note=f"Across {total_rentals:,} completed rentals.",
+            note=(
+                f"Across {total_rentals:,} completed rentals."
+                if total_rentals
+                else "No returned rentals in this period yet."
+            ),
         )
 
     # ========================================================
     # REVENUE TREND
     # ========================================================
 
+    # One month selected -> daily trend; otherwise monthly.
+    single_month = bool(
+        period_start
+        and period_start == period_end
+        and re.fullmatch(r"\d{4}-\d{2}", str(period_start))
+    )
+    trend_grain = "day" if single_month else "month"
+
     trend_df = load_monthly_rental_trend(
         selected_category_name,
         selected_store_id,
+        period_start,
+        period_end,
+        trend_grain,
     )
 
     st.markdown(
@@ -3059,8 +3212,9 @@ def render_overview():
                         Revenue Trend
                     </div>
                     <div class="card-subtitle">
-                        Monthly total revenue from payment.amount
-                        grouped by payment.payment_date.
+                        Total revenue from payment.amount grouped by
+                        payment.payment_date (monthly, or daily when one
+                        month is selected).
                     </div>
                 </div>
                 <div class="card-body">
@@ -3080,25 +3234,40 @@ def render_overview():
 
         else:
 
-            chart = (
-                alt.Chart(trend_df)
-                .mark_line(
+            # Daily view uses bars: Sakila has gaps between payment days,
+            # and a line would suggest values on days without data.
+            base = alt.Chart(trend_df)
+            marked = (
+                base.mark_bar(color="#312E81")
+                if trend_grain == "day"
+                else base.mark_line(
                     point=True,
                     color="#312E81",
                     strokeWidth=2,
                 )
+            )
+
+            chart = (
+                marked
                 .encode(
                     x=alt.X(
                         "month:N",
                         title=None,
-                        axis=alt.Axis(labelAngle=0),
+                        sort=None,
+                        axis=alt.Axis(
+                            labelAngle=0 if trend_grain == "month" else -45,
+                            labelOverlap=True,
+                        ),
                     ),
                     y=alt.Y(
                         "revenue:Q",
                         title="Total Revenue",
                     ),
                     tooltip=[
-                        alt.Tooltip("month:N", title="Month"),
+                        alt.Tooltip(
+                            "month:N",
+                            title="Day" if trend_grain == "day" else "Month",
+                        ),
                         alt.Tooltip(
                             "revenue:Q",
                             title="Revenue",
@@ -3283,7 +3452,8 @@ def render_overview():
                         Average Rental Rate by Category
                     </div>
                     <div class="card-subtitle">
-                        Backend-calculated average rate.
+                        Film catalogue average (not affected by the
+                        store / time filters).
                     </div>
                 </div>
                 <div class="card-body">
