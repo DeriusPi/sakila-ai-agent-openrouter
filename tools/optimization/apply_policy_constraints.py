@@ -10,7 +10,10 @@ def apply_policy_constraints(
     rental_duration_options=None,
     current_fee_per_day=1.00,
     min_rental_duration=3,
-    max_rental_duration=7
+    max_rental_duration=7,
+    max_late_probability=None,
+    allow_higher_late_rate=False,
+    **behavior
 ):
     """
     Apply business constraints to generated policy scenarios.
@@ -20,6 +23,14 @@ def apply_policy_constraints(
 
     Rental duration is constrained by the specified
     minimum and maximum values.
+
+    NEW service-level constraint: by default a policy may not INCREASE
+    the late-return probability above the current policy (otherwise
+    "shorter rentals -> more customers late -> more fees" always wins).
+    max_late_probability (0-1) sets an explicit ceiling instead;
+    allow_higher_late_rate=True switches the constraint off.
+
+    Feasible scenarios are ranked by net policy value.
     """
 
     result = find_best_policy(
@@ -29,10 +40,20 @@ def apply_policy_constraints(
         rental_rate=rental_rate,
         fee_options=fee_options,
         rental_duration_options=rental_duration_options,
-        current_fee_per_day=current_fee_per_day
+        current_fee_per_day=current_fee_per_day,
+        **behavior
     )
 
     all_scenarios = result["all_scenarios"]
+    current_scenario = result.get("current_scenario") or {}
+
+    late_ceiling = None
+    if max_late_probability not in (None, ""):
+        late_ceiling = float(max_late_probability)
+        if late_ceiling > 1:
+            late_ceiling = late_ceiling / 100.0
+    elif not allow_higher_late_rate and current_scenario:
+        late_ceiling = float(current_scenario.get("late_probability", 1.0))
 
     fee_constraint = result.get(
         "fee_constraint",
@@ -82,6 +103,17 @@ def apply_policy_constraints(
                 f"${upper_fee:.2f}/day"
             )
 
+        # Service-level constraint (late-return probability)
+        if (
+            late_ceiling is not None
+            and float(scenario.get("late_probability", 0)) > late_ceiling + 1e-6
+        ):
+            violations.append(
+                f"late-return probability "
+                f"{float(scenario['late_probability']) * 100:.2f}% is above "
+                f"the allowed {late_ceiling * 100:.2f}%"
+            )
+
         # Rental duration constraints
         if duration < min_rental_duration:
             violations.append(
@@ -123,7 +155,8 @@ def apply_policy_constraints(
                 "fee_lower_bound": lower_fee,
                 "fee_upper_bound": upper_fee,
                 "min_rental_duration": min_rental_duration,
-                "max_rental_duration": max_rental_duration
+                "max_rental_duration": max_rental_duration,
+                "max_late_probability": late_ceiling
             }
         }
 
@@ -132,7 +165,7 @@ def apply_policy_constraints(
     # ---------------------------------------------------------
 
     feasible_scenarios.sort(
-        key=lambda x: x["expected_total_revenue"],
+        key=lambda x: x.get("net_value", x["expected_total_revenue"]),
         reverse=True
     )
 
@@ -157,6 +190,9 @@ def apply_policy_constraints(
             "fee_lower_bound": lower_fee,
             "fee_upper_bound": upper_fee,
             "min_rental_duration": min_rental_duration,
-            "max_rental_duration": max_rental_duration
-        }
+            "max_rental_duration": max_rental_duration,
+            "max_late_probability": late_ceiling
+        },
+        "current_scenario": current_scenario,
+        "comparison": result.get("comparison"),
     }

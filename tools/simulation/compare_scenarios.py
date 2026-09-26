@@ -45,8 +45,12 @@ def _to_number_list(values, cast=float):
     return out or None
 
 
-def _scenario_row(policy_type, policy, fee, duration, sim, baseline_total):
+def _scenario_row(policy_type, policy, fee, duration, sim, baseline_total,
+                  baseline_net=None, baseline_late=None):
     revenue_change = sim["expected_total_revenue"] - baseline_total
+    baseline_net = baseline_net if baseline_net is not None else baseline_total
+    net_change = sim.get("net_value", sim["expected_total_revenue"]) - baseline_net
+    late_returns = sim.get("expected_late_returns")
 
     return {
         "policy_type": policy_type,
@@ -66,6 +70,21 @@ def _scenario_row(policy_type, policy, fee, duration, sim, baseline_total):
             if baseline_total > 0
             else 0.0
         ),
+        "expected_late_returns": late_returns,
+        "late_returns_change_pct": (
+            round((late_returns - baseline_late) / baseline_late * 100, 2)
+            if late_returns is not None and baseline_late
+            else 0.0
+        ),
+        "on_time_rate_pct": sim.get("on_time_rate_pct"),
+        "opportunity_cost": sim.get("opportunity_cost"),
+        "net_value": sim.get("net_value", sim["expected_total_revenue"]),
+        "net_value_change": round(net_change, 2),
+        "net_value_change_pct": (
+            round(net_change / baseline_net * 100, 2)
+            if baseline_net > 0
+            else 0.0
+        ),
     }
 
 
@@ -76,10 +95,18 @@ def compare_scenarios(
     rental_rate,
     fee_options=None,
     rental_duration_options=None,
-    current_fee_per_day=1.00
+    current_fee_per_day=1.00,
+    late_fee_elasticity=None,
+    late_days_elasticity=None,
+    demand_fee_elasticity=None,
+    demand_duration_elasticity=None,
 ):
     """
     Compare fee-policy and rental-duration scenarios.
+
+    Scenarios are ranked by NET POLICY VALUE (revenue minus the
+    opportunity cost of copies kept late); a higher fee lowers late
+    returns through the behaviour model in tools/simulation/behavior.py.
 
     All scenarios are evaluated with the SAME business-level
     simulation (simulate_fee_policy), so their expected_total_revenue
@@ -142,6 +169,14 @@ def compare_scenarios(
 
     rental_duration_options = sorted(set(rental_duration_options))
 
+    sim_kwargs = {
+        "reference_rental_duration": current_rental_duration,
+        "late_fee_elasticity": late_fee_elasticity,
+        "late_days_elasticity": late_days_elasticity,
+        "demand_fee_elasticity": demand_fee_elasticity,
+        "demand_duration_elasticity": demand_duration_elasticity,
+    }
+
     # ---------------------------------------------------------
     # 4. Baseline = current fee + current duration
     # ---------------------------------------------------------
@@ -153,9 +188,12 @@ def compare_scenarios(
         rental_rate=rental_rate,
         fee_per_day=current_fee,
         current_fee_per_day=current_fee,
+        **sim_kwargs,
     )
 
     baseline_total = float(baseline_sim["expected_total_revenue"])
+    baseline_net = float(baseline_sim["net_value"])
+    baseline_late = float(baseline_sim["expected_late_returns"])
 
     current_scenario = _scenario_row(
         "current",
@@ -167,6 +205,8 @@ def compare_scenarios(
         current_rental_duration,
         baseline_sim,
         baseline_total,
+        baseline_net,
+        baseline_late,
     )
 
     # ---------------------------------------------------------
@@ -193,6 +233,7 @@ def compare_scenarios(
             rental_rate=rental_rate,
             fee_per_day=fee,
             current_fee_per_day=current_fee,
+            **sim_kwargs,
         )
 
         fee_scenarios.append(
@@ -203,6 +244,8 @@ def compare_scenarios(
                 current_rental_duration,
                 sim,
                 baseline_total,
+                baseline_net,
+                baseline_late,
             )
         )
 
@@ -224,6 +267,7 @@ def compare_scenarios(
             rental_rate=rental_rate,
             fee_per_day=current_fee,
             current_fee_per_day=current_fee,
+            **sim_kwargs,
         )
 
         rental_duration_scenarios.append(
@@ -234,6 +278,8 @@ def compare_scenarios(
                 duration,
                 sim,
                 baseline_total,
+                baseline_net,
+                baseline_late,
             )
         )
 
@@ -248,7 +294,7 @@ def compare_scenarios(
     )
 
     all_scenarios.sort(
-        key=lambda x: x["expected_total_revenue"],
+        key=lambda x: x["net_value"],
         reverse=True
     )
 
@@ -275,13 +321,22 @@ def compare_scenarios(
 
         "inputs_used": baseline_sim.get("inputs_used"),
         "scale_note": baseline_sim.get("scale_note"),
+        "ranking_metric": "net_value",
+        "formula": baseline_sim.get("formula"),
+        "behavior_assumptions": baseline_sim.get("behavior_assumptions"),
+        "cost_basis": baseline_sim.get("cost_basis"),
         "assumptions": [
-            "Fee scenarios: demand factor = (fee / current_fee) ^ -0.10 "
-            "(simulation assumption, not an observed elasticity).",
-            "Rental-duration scenarios: demand is held constant; only "
-            "late probability and expected late days change via the ML "
+            "A higher late fee lowers the late-return probability "
+            "(elasticity e_p) and the number of late days (e_d); "
+            "late probability/days at the current fee come from the ML "
             "models.",
-            "Late-return behaviour is not modelled as reacting to the fee.",
+            "Rental volume reacts to the fee (e_n) and to the rental "
+            "period (e_D).",
+            "Scenarios are ranked by net policy value = total revenue - "
+            "opportunity cost of late days (cost per late day measured "
+            "from inventory utilisation in the database).",
+            "Elasticities are assumptions: Sakila has no variation in the "
+            "late fee to estimate them.",
         ],
     }
 

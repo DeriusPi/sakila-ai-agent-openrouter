@@ -554,10 +554,11 @@ TOOL_DEFINITIONS = [
     {
         "name": "simulate_fee_policy",
         "description": (
-            "Simulate business-level expected rental revenue, late-fee "
-            "revenue and total revenue for ONE late-fee-per-day value, "
-            "compared with the current fee. Late probability and late "
-            "days are predicted internally by the ML models."
+            "Simulate ONE late-fee-per-day value at business level vs the "
+            "current fee: late probability / late days (ML at the current "
+            "fee, then LOWERED for a higher fee by the behaviour model), "
+            "late returns, rental / late-fee / total revenue, opportunity "
+            "cost of late days and NET POLICY VALUE."
         ),
         "input_schema": {
             "type": "object",
@@ -616,8 +617,9 @@ TOOL_DEFINITIONS = [
         "name": "compare_scenarios",
         "description": (
             "Generate and rank the current policy, late-fee scenarios and "
-            "rental-duration scenarios on the same business-level expected "
-            "total revenue scale."
+            "rental-duration scenarios by NET POLICY VALUE (revenue minus "
+            "opportunity cost of late days); includes late-return change "
+            "per scenario (higher fee -> fewer late returns)."
         ),
         "input_schema": {
             "type": "object",
@@ -633,8 +635,8 @@ TOOL_DEFINITIONS = [
     {
         "name": "find_best_policy",
         "description": (
-            "Scenario with the highest expected total revenue BEFORE "
-            "business constraints."
+            "Scenario with the highest net policy value BEFORE business "
+            "constraints."
         ),
         "input_schema": {
             "type": "object",
@@ -647,8 +649,9 @@ TOOL_DEFINITIONS = [
         "name": "apply_policy_constraints",
         "description": (
             "Apply business constraints (DB-derived fee range, min/max "
-            "rental duration) and return feasible and rejected scenarios "
-            "with the best feasible policy."
+            "rental duration, late-return rate must not increase) and "
+            "return feasible and rejected scenarios with the best feasible "
+            "policy by net policy value."
         ),
         "input_schema": {
             "type": "object",
@@ -671,9 +674,11 @@ TOOL_DEFINITIONS = [
         "name": "generate_policy_recommendation",
         "description": (
             "FINAL POLICY TOOL. Runs the full pipeline (scenarios -> "
-            "constraints -> best feasible policy) and returns the "
-            "recommendation with its reason. Use for 'what policy / fee / "
-            "duration should we use?' questions."
+            "constraints incl. 'late-return rate must not increase' -> "
+            "best feasible policy by net policy value) and returns the "
+            "recommendation with its reason, net value / revenue / late-"
+            "return changes. Use for 'what policy / fee / duration should "
+            "we use?' questions."
         ),
         "input_schema": {
             "type": "object",

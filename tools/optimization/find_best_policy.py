@@ -8,11 +8,13 @@ def find_best_policy(
     rental_rate,
     fee_options=None,
     rental_duration_options=None,
-    current_fee_per_day=1.00
+    current_fee_per_day=1.00,
+    **behavior
 ):
     """
-    Find the policy scenario with the highest
-    expected total revenue.
+    Find the policy scenario with the highest net policy value
+    (see tools/simulation/behavior.py). **behavior = optional
+    elasticities passed to the simulation.
 
     Fee constraints are derived from historical
     late-fee observations in the Sakila database
@@ -26,7 +28,8 @@ def find_best_policy(
         rental_rate=rental_rate,
         fee_options=fee_options,
         rental_duration_options=rental_duration_options,
-        current_fee_per_day=current_fee_per_day
+        current_fee_per_day=current_fee_per_day,
+        **behavior
     )
 
     return {
@@ -42,5 +45,7 @@ def find_best_policy(
         "fee_range": comparison.get(
             "fee_range",
             {}
-        )
+        ),
+        "current_scenario": comparison.get("current_scenario"),
+        "comparison": comparison,
     }

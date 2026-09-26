@@ -24,6 +24,10 @@ from tools.data.get_store_data import get_store_data
 from tools.data.llm_views import get_rental_summary
 from tools.ml.predict_late_probability import predict_late_probability
 from tools.simulation.compare_scenarios import compare_scenarios
+from tools.simulation.simulate_fee_policy import simulate_fee_policy
+from tools.optimization.generate_policy_recommendation import (
+    generate_policy_recommendation,
+)
 from tools.tool_definitions import validate_tool_registry
 
 
@@ -139,6 +143,19 @@ def main():
           min(totals) > 1000 and any(
               x["policy_type"] == "rental_duration" for x in sc["all_scenarios"]
           ))
+
+    low = simulate_fee_policy(0.512, "All", 5, 2.98, 1.00, 1.00)
+    high = simulate_fee_policy(0.512, "All", 5, 2.98, 1.50, 1.00)
+    check("higher fee -> lower late probability and fewer late returns",
+          high["late_probability"] < low["late_probability"]
+          and high["expected_late_returns"] < low["expected_late_returns"])
+
+    rec = generate_policy_recommendation(0.512, "All", 5, 2.98)
+    best = rec["best_policy"]
+    check("recommended policy does not increase late returns",
+          best is not None
+          and best["late_probability"]
+          <= rec["current_scenario"]["late_probability"] + 1e-9)
 
     print("=" * 70)
     print("ALL DATA CONSISTENCY TESTS PASSED")

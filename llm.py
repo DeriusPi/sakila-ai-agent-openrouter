@@ -59,14 +59,23 @@ MAX_TOOL_ROUNDS = 8
 MAX_TOOL_RESULT_CHARS = 30000
 MAX_HISTORY_TURNS = 6
 LLM_MAX_RETRIES = 3
-# FIX: 4096 was too small for answers with a long chart/table (e.g. daily
-# revenue for a whole year) - the JSON got cut off and the app showed
-# "The agent returned no answer". Reasoning models also spend part of
-# this budget on hidden reasoning.
-try:
-    LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "8192"))
-except ValueError:
-    LLM_MAX_TOKENS = 8192
+# No output-token cap by default: the request does not send max_tokens, so
+# the provider lets the model use its full output length (4096 used to cut
+# long answers off - "The agent returned no answer"). Set LLM_MAX_TOKENS
+# only if you want a cap again.
+def _optional_int(name):
+    value = os.getenv(name, "").strip()
+    try:
+        return int(value) if value else None
+    except ValueError:
+        return None
+
+
+LLM_MAX_TOKENS = _optional_int("LLM_MAX_TOKENS")
+
+# The Anthropic API REQUIRES max_tokens; use a large value (16k keeps
+# non-streaming requests within the SDK's limit).
+ANTHROPIC_MAX_TOKENS = LLM_MAX_TOKENS or 16000
 
 
 def _setting(name, default=None):
@@ -355,11 +364,16 @@ Never present interpretation as fact. Never invent recommendations.
 ============================================================
 SIMULATION LIMITATION
 ============================================================
-Simulations use a demand-sensitivity assumption and hold late-return
-behaviour constant across fee scenarios. Do NOT claim that changing
-the fee changes customers' lateness unless the tool measures it. Use
-"kết quả mô phỏng", "doanh thu kỳ vọng", "theo giả định mô phỏng hiện
-tại" for simulated values.
+Policy simulations combine the ML predictions (at the current fee)
+with a behaviour model: a higher late fee LOWERS the late-return
+probability (elasticity e_p = 0.30) and the late days (e_d = 0.20) and
+slightly lowers rental volume (e_n = 0.10); a shorter rental period
+lowers rental volume (e_D = 0.20). These elasticities are ASSUMPTIONS
+(Sakila has no fee variation) - say so. Policies are ranked by NET
+POLICY VALUE = rental revenue + late-fee revenue - opportunity cost of
+copies kept late, and by default a policy may not increase the
+late-return rate. Use "kết quả mô phỏng", "giá trị ròng kỳ vọng", "theo
+giả định mô phỏng hiện tại" for simulated values.
 
 ============================================================
 BI PRESENTATION
@@ -1253,9 +1267,11 @@ class OpenRouterAdapter:
         kwargs = {
             "model": model,
             "messages": messages,
-            "max_tokens": LLM_MAX_TOKENS,
             "temperature": 0.1,
         }
+
+        if LLM_MAX_TOKENS:
+            kwargs["max_tokens"] = LLM_MAX_TOKENS
 
         if allow_tools:
             kwargs["tools"] = self.tools
@@ -1364,7 +1380,7 @@ class AnthropicAdapter:
     def create(self, model, messages, allow_tools=True):
         kwargs = {
             "model": model,
-            "max_tokens": LLM_MAX_TOKENS,
+            "max_tokens": ANTHROPIC_MAX_TOKENS,
             "system": self.system_prompt,
             "messages": messages,
             "tools": self.tools,

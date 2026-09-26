@@ -31,6 +31,7 @@ from tools.optimization.generate_policy_recommendation import (
 )
 from tools.simulation.compare_scenarios import compare_scenarios
 from tools.simulation.simulate_fee_policy import simulate_fee_policy
+from tools.simulation.behavior import DEFAULT_BEHAVIOR, late_day_opportunity_cost
 from textwrap import dedent
 
 
@@ -85,6 +86,14 @@ if "pred_rental_rate" not in st.session_state:
 
 if "pred_fee" not in st.session_state:
     st.session_state.pred_fee = 1.00
+
+# Behaviour assumptions (how customers react to the fee / rental period)
+for _key, _value in DEFAULT_BEHAVIOR.items():
+    if f"pred_{_key}" not in st.session_state:
+        st.session_state[f"pred_{_key}"] = float(_value)
+
+if "pred_keep_service_level" not in st.session_state:
+    st.session_state.pred_keep_service_level = True
 
 
 # ============================================================
@@ -1249,9 +1258,9 @@ def _func_has_params(module_name, func_name, *params):
 # (file on GitHub, check that passes only with the fixed version)
 _BACKEND_FILE_CHECKS = [
     ("db.py", lambda: _module_has("db", "_setting")),
-    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label", "hydrate_from_tools")),
+    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label", "hydrate_from_tools", "ANTHROPIC_MAX_TOKENS")),
     ("tools/tool_definitions.py",
-     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES", source_contains='Use \\"All\\" for')),
+     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES", source_contains="NET POLICY VALUE")),
     ("tools/data/business_metrics.py",
      lambda: _module_has("tools.data.business_metrics", "get_business_kpis", "build_scope_filters")),
     ("tools/data/llm_views.py",
@@ -1268,14 +1277,20 @@ _BACKEND_FILE_CHECKS = [
      lambda: _module_has("tools.ml.predict_late_probability", "normalize_ml_inputs", "category_weights")),
     ("tools/ml/predict_expected_late_days.py",
      lambda: _module_has("tools.ml.predict_expected_late_days", "normalize_ml_inputs", "category_weights")),
+    ("tools/simulation/behavior.py",
+     lambda: _module_has("tools.simulation.behavior", "apply_behavior", "late_day_opportunity_cost")),
     ("tools/simulation/simulate_fee_policy.py",
-     lambda: _module_has("tools.simulation.simulate_fee_policy", "_load_baseline")),
+     lambda: _module_has("tools.simulation.simulate_fee_policy", "_load_baseline", "_evaluate")),
     ("tools/simulation/compare_scenarios.py",
-     lambda: _module_has("tools.simulation.compare_scenarios", "_scenario_row")),
+     lambda: _module_has("tools.simulation.compare_scenarios", "_scenario_row", source_contains="net_value")),
+    ("tools/optimization/find_best_policy.py",
+     lambda: _module_has("tools.optimization.find_best_policy", source_contains="**behavior")),
+    ("tools/optimization/apply_policy_constraints.py",
+     lambda: _module_has("tools.optimization.apply_policy_constraints", source_contains="late_ceiling")),
     ("tools/simulation/simulate_rental_policy.py",
      lambda: _module_has("tools.simulation.simulate_rental_policy", source_contains="Shorten rental duration")),
     ("tools/optimization/generate_policy_recommendation.py",
-     lambda: _module_has("tools.optimization.generate_policy_recommendation", source_contains="scale_note")),
+     lambda: _module_has("tools.optimization.generate_policy_recommendation", source_contains="ranking_metric")),
     ("tools/analysis/analyze_late_fee_revenue.py",
      lambda: _module_has("tools.analysis.analyze_late_fee_revenue", "analyze_late_fee_revenue")),
     ("tools/analysis/analyze_revenue_drivers.py",
@@ -1674,13 +1689,17 @@ PREDICTIONS_INTRO_HTML = (
     'sử của khách, số ngày thuê, giá thuê, phí trễ/ngày) và bấm '
     '<b>Run Prediction &amp; Optimize</b>. Hệ thống sẽ '
     '(1) dự đoán <b>xác suất trả trễ</b> và <b>số ngày trễ</b> bằng mô hình '
-    'ML huấn luyện trên dữ liệu Sakila, (2) <b>mô phỏng doanh thu</b> ở quy '
-    'mô toàn doanh nghiệp (15,861 lượt thuê đã trả), (3) <b>so sánh các '
-    'kịch bản</b> phí trễ và số ngày thuê, rồi (4) <b>đề xuất chính sách</b> '
-    'cho doanh thu kỳ vọng cao nhất trong giới hạn cho phép.'
+    'ML huấn luyện trên dữ liệu Sakila; (2) điều chỉnh theo <b>phản ứng của '
+    'khách với phí trễ</b> – phí càng cao thì càng ít khách trả trễ và trả '
+    'trễ ít ngày hơn; (3) <b>mô phỏng</b> doanh thu và <b>giá trị ròng</b> '
+    '(doanh thu trừ chi phí cơ hội khi đĩa bị giữ quá hạn) ở quy mô toàn '
+    'doanh nghiệp; (4) <b>so sánh các kịch bản</b> phí trễ và số ngày thuê, '
+    'rồi <b>đề xuất chính sách</b> có giá trị ròng cao nhất mà không làm '
+    'tăng tỷ lệ trả trễ.'
     '</div>'
     '<div class="page-intro-note">'
-    'Kết quả là ước tính what-if theo giả định mô phỏng, không phải doanh '
+    'Kết quả là ước tính what-if theo giả định mô phỏng (xem mục '
+    '"Behaviour assumptions &amp; evaluation formula"), không phải doanh '
     'thu thực tế. Trang này không dùng bộ lọc Film Category / Store / Time '
     'Period của trang Overview.'
     '</div>'
@@ -4030,7 +4049,18 @@ def current_prediction_inputs():
         "duration": int(st.session_state.pred_duration),
         "rental_rate": round(float(st.session_state.pred_rental_rate), 2),
         "fee": round(float(st.session_state.pred_fee), 2),
+        "behavior": {
+            key: round(float(st.session_state[f"pred_{key}"]), 3)
+            for key in DEFAULT_BEHAVIOR
+        },
+        "keep_service_level": bool(st.session_state.pred_keep_service_level),
     }
+
+
+def reset_behavior_defaults():
+    for key, value in DEFAULT_BEHAVIOR.items():
+        st.session_state[f"pred_{key}"] = float(value)
+    st.session_state.pred_keep_service_level = True
 
 
 def prediction_constraints():
@@ -4063,6 +4093,7 @@ def run_policy_engine():
     rental_rate = inputs["rental_rate"]
     fee = inputs["fee"]
     current_fee = limits["current_fee"]
+    behavior = dict(inputs["behavior"])
 
     prediction = {
 
@@ -4087,15 +4118,20 @@ def run_policy_engine():
             rental_rate=rental_rate,
             fee_per_day=fee,
             current_fee_per_day=current_fee,
+            **behavior,
         ),
     }
 
+    # NEW: scenarios are ranked by net policy value, a higher fee lowers
+    # late returns (behaviour model) and, by default, a policy may not
+    # increase the late-return rate (service-level constraint).
     scenarios = compare_scenarios(
         customer_late_rate=customer_rate,
         category=category,
         current_rental_duration=duration,
         rental_rate=rental_rate,
         current_fee_per_day=current_fee,
+        **behavior,
     )
 
     policy = generate_policy_recommendation(
@@ -4106,6 +4142,8 @@ def run_policy_engine():
         current_fee_per_day=current_fee,
         min_rental_duration=limits["min_duration"],
         max_rental_duration=limits["max_duration"],
+        allow_higher_late_rate=not inputs["keep_service_level"],
+        **behavior,
     )
 
     st.session_state.prediction_result = prediction
@@ -4310,6 +4348,12 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             ["Max Rental Duration", f"{limits['max_duration']} days"],
             ["Observed Fee Range", f"{lower_text} - {upper_text}/day"],
             ["Current Late Fee", f"{money(limits['current_fee'])}/day"],
+            [
+                "Late-return rate",
+                "must not increase"
+                if st.session_state.pred_keep_service_level
+                else "no limit",
+            ],
         ]
 
         render_html_table(
@@ -4318,6 +4362,65 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
         )
 
         st.markdown("</div></div>", unsafe_allow_html=True)
+
+        # NEW: behaviour model - how customers react to the fee and to the
+        # rental period, plus the evaluation formula.
+        cost = late_day_opportunity_cost()
+        with st.expander("⚙️ Behaviour assumptions & evaluation formula"):
+            st.markdown(
+                "Sakila luôn tính phí trễ khoảng **$1/ngày**, nên dữ liệu "
+                "không đủ để ước lượng khách phản ứng với phí thế nào. "
+                "Các hệ số dưới đây là **giả định có thể chỉnh**:"
+            )
+            st.slider(
+                "e_p · Late-return sensitivity to fee",
+                0.0, 1.5, step=0.05, key="pred_late_fee_elasticity",
+                help="0.30 = phí tăng 10% → số lượt trả trễ giảm khoảng 3%.",
+            )
+            st.slider(
+                "e_d · Late-days sensitivity to fee",
+                0.0, 1.5, step=0.05, key="pred_late_days_elasticity",
+                help="0.20 = phí tăng 10% → khách trễ trả sớm hơn khoảng 2%.",
+            )
+            st.slider(
+                "e_n · Rental-volume sensitivity to fee",
+                0.0, 1.0, step=0.05, key="pred_demand_fee_elasticity",
+                help="0.10 = phí tăng 10% → lượng thuê giảm khoảng 1%.",
+            )
+            st.slider(
+                "e_D · Rental-volume sensitivity to rental period",
+                0.0, 1.5, step=0.05, key="pred_demand_duration_elasticity",
+                help="0.20 = rút ngắn số ngày thuê 10% → lượng thuê giảm khoảng 2%.",
+            )
+            st.checkbox(
+                "Policy must not increase the late-return rate",
+                key="pred_keep_service_level",
+                help=(
+                    "Bật: loại các chính sách làm khách trả trễ nhiều hơn "
+                    "hiện tại (ví dụ rút ngắn ngày thuê chỉ để thu thêm phí)."
+                ),
+            )
+            st.button(
+                "Reset assumptions",
+                key="reset_behavior_btn",
+                on_click=reset_behavior_defaults,
+            )
+            st.markdown(
+                "**Công thức đánh giá** (f = phí mới, f₀ = phí hiện tại, "
+                "D = số ngày thuê, p₀ và d₀ = dự đoán ML ở phí hiện tại):\n\n"
+                "- Xác suất trả trễ: `p = p₀ × (f₀/f)^e_p`\n"
+                "- Số ngày trễ: `d = d₀ × (f₀/f)^e_d`\n"
+                "- Lượng thuê: `N = N₀ × (f₀/f)^e_n × (D/D₀)^e_D`\n"
+                "- Doanh thu = `N × giá thuê + N × p × d × f`\n"
+                "- Chi phí cơ hội = `N × p × d × c`\n"
+                "- **Giá trị ròng = Doanh thu − Chi phí cơ hội**\n\n"
+                # "\\$" - a bare "$...$" pair is rendered as LaTeX math.
+                f"c = **\\${cost['cost_per_late_day']:.2f}/ngày trễ** = tỷ lệ "
+                f"sử dụng kho {cost['utilization'] * 100:.1f}% × doanh thu "
+                f"trung bình \\${cost['revenue_per_rental_day']:.2f}/ngày thuê "
+                f"({cost['source']}). Chính sách được đề xuất là chính sách "
+                "hợp lệ có **giá trị ròng cao nhất**."
+            )
 
         run = st.button(
             "Run Prediction & Optimize",
@@ -4388,26 +4491,40 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
         ):
             st.caption(f"⚠ {warning}")
 
-        # FIX: 2 x 2 layout - four cards in one row were too narrow and
+        # FIX: 2-column layout - four cards in one row were too narrow and
         # business-level values ("$76,048.59") wrapped onto two lines.
+        # NEW: the probability / late days shown are AFTER the customers'
+        # reaction to the chosen fee (behaviour model), plus late returns
+        # and the net policy value used to rank policies.
+        p_fee = float(simulation.get("late_probability", 0) or 0)
+        risk = "HIGH" if p_fee >= 0.70 else "MEDIUM" if p_fee >= 0.40 else "LOW"
+        ml_p = float(simulation.get("ml_late_probability", 0) or 0) * 100
+
         c1, c2 = st.columns(2)
         c3, c4 = st.columns(2)
+        c5, c6 = st.columns(2)
 
         with c1:
             render_metric_card(
                 "LATE-RETURN PROBABILITY",
-                pct(probability.get("late_probability_pct")),
-                badge=probability.get("risk_level", "—"),
-                note="Prediction from the late-return classifier.",
+                pct(simulation.get("late_probability_pct")),
+                badge=risk,
+                note=(
+                    f"At {money(used['fee'])}/day. ML at current fee: "
+                    f"{ml_p:.2f}%."
+                ),
                 primary_badge=True,
             )
 
         with c2:
             render_metric_card(
                 "EXPECTED LATE DAYS",
-                f"{float(late_days.get('expected_late_days', 0)):.2f}",
-                badge="Days",
-                note="Predicted non-negative late duration.",
+                f"{float(simulation.get('expected_late_days', 0)):.2f}",
+                badge="Days (if late)",
+                note=(
+                    "ML at current fee: "
+                    f"{float(simulation.get('ml_expected_late_days', 0)):.2f} days."
+                ),
             )
 
         with c3:
@@ -4428,7 +4545,30 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                 "EXPECTED TOTAL REVENUE",
                 money(simulation.get("expected_total_revenue", 0)),
                 badge=f"{change_pct:+.2f}% vs current fee",
-                note="Expected rental revenue plus late-fee revenue.",
+                note="Rental revenue plus late-fee revenue.",
+            )
+
+        with c5:
+            late_change = float(simulation.get("late_returns_change_pct", 0) or 0)
+            render_metric_card(
+                "EXPECTED LATE RETURNS",
+                f"{float(simulation.get('expected_late_returns', 0) or 0):,.0f}",
+                badge=f"{late_change:+.2f}% vs current fee",
+                note=(
+                    f"On-time rate {float(simulation.get('on_time_rate_pct', 0) or 0):.2f}%."
+                ),
+            )
+
+        with c6:
+            net_change = float(simulation.get("net_value_change_pct", 0) or 0)
+            render_metric_card(
+                "NET POLICY VALUE",
+                money(simulation.get("net_value", 0)),
+                badge=f"{net_change:+.2f}% vs current fee",
+                note=(
+                    "Revenue − opportunity cost of late days "
+                    f"({money(simulation.get('opportunity_cost', 0))})."
+                ),
             )
 
         st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
@@ -4463,7 +4603,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                             {html.escape(str(len(policy.get("feasible_scenarios", []))))} feasible scenarios
                         </div>
                     </div>
-                    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;">
+                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:16px;">
                         <div>
                             <div class="metric-label">POLICY TYPE</div>
                             <div style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:13px;color:#0F172A;">
@@ -4483,9 +4623,15 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                             </div>
                         </div>
                         <div>
-                            <div class="metric-label">UPLIFT</div>
+                            <div class="metric-label">NET VALUE</div>
                             <div style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:13px;color:#312E81;">
-                                {pct(best.get("revenue_change_pct", 0))}
+                                {float(best.get("net_value_change_pct", 0) or 0):+.2f}%
+                            </div>
+                        </div>
+                        <div>
+                            <div class="metric-label">LATE RETURNS</div>
+                            <div style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:13px;color:#0F172A;">
+                                {float(best.get("late_returns_change_pct", 0) or 0):+.2f}%
                             </div>
                         </div>
                     </div>
@@ -4531,7 +4677,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             <div class="section-card">
                 <div class="card-header">
                     <div class="card-title">Scenario Comparison &amp; Sensitivity Analysis</div>
-                    <div class="card-subtitle">Expected revenue across fee and rental-duration scenarios generated by the current simulation pipeline.</div>
+                    <div class="card-subtitle">Net policy value (revenue − opportunity cost of late days) for each fee and rental-duration scenario. A higher fee lowers late returns; scenarios that increase the late-return rate are rejected when the service-level rule is on.</div>
                 </div>
                 <div class="card-body">
             """,
@@ -4540,9 +4686,33 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
 
         all_scenarios = (scenarios or {}).get("all_scenarios", []) if scenarios else []
 
+        # Feasibility / best policy come from the recommendation step.
+        rejected = {}
+        best_key = None
+        if policy:
+            for row in policy.get("rejected_scenarios") or []:
+                rejected[(row.get("policy_type"), row.get("fee_per_day"),
+                          row.get("rental_duration"))] = "; ".join(
+                    row.get("constraint_violations") or []
+                )
+            best = policy.get("best_policy") or {}
+            if best:
+                best_key = (best.get("policy_type"), best.get("fee_per_day"),
+                            best.get("rental_duration"))
+
+        def scenario_status(row):
+            key = (row.get("policy_type"), row.get("fee_per_day"),
+                   row.get("rental_duration"))
+            if key == best_key:
+                return "Best"
+            if key in rejected:
+                return "Rejected"
+            if row.get("policy_type") == "current":
+                return "Current"
+            return "Feasible"
+
         if all_scenarios:
-            scenario_df = pd.DataFrame(all_scenarios)
-            scenario_df = scenario_df.head(12).copy()
+            scenario_df = pd.DataFrame(all_scenarios).head(12).copy()
             scenario_df["scenario_label"] = scenario_df.apply(
                 lambda r: (
                     f"${float(r.get('fee_per_day', 0)):.2f} @ "
@@ -4550,26 +4720,33 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                 ),
                 axis=1,
             )
+            scenario_df["status"] = [
+                scenario_status(r) for r in all_scenarios[:12]
+            ]
+            if "net_value" not in scenario_df.columns:
+                scenario_df["net_value"] = scenario_df["expected_total_revenue"]
 
             chart = (
                 alt.Chart(scenario_df)
                 .mark_bar()
                 .encode(
                     x=alt.X("scenario_label:N", sort=None, title=None),
-                    y=alt.Y("expected_total_revenue:Q", title="Expected Revenue"),
+                    y=alt.Y("net_value:Q", title="Net policy value ($)"),
                     color=alt.Color(
-                        "policy_type:N",
+                        "status:N",
                         scale=alt.Scale(
-                            domain=["current", "fee", "rental_duration"],
-                            range=["#94A3B8", "#312E81", "#64748B"],
+                            domain=["Best", "Current", "Feasible", "Rejected"],
+                            range=["#312E81", "#94A3B8", "#6366F1", "#E2E8F0"],
                         ),
                         legend=alt.Legend(title=None, orient="bottom"),
                     ),
                     tooltip=[
                         alt.Tooltip("scenario_label:N", title="Scenario"),
+                        alt.Tooltip("status:N", title="Status"),
+                        alt.Tooltip("net_value:Q", title="Net value", format="$,.2f"),
                         alt.Tooltip(
                             "expected_total_revenue:Q",
-                            title="Expected revenue",
+                            title="Total revenue",
                             format="$,.2f",
                         ),
                         alt.Tooltip(
@@ -4578,9 +4755,9 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                             format=".2%",
                         ),
                         alt.Tooltip(
-                            "expected_late_days:Q",
-                            title="Expected late days",
-                            format=".2f",
+                            "late_returns_change_pct:Q",
+                            title="Late returns vs current (%)",
+                            format="+.2f",
                         ),
                     ],
                 )
@@ -4590,24 +4767,17 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             st.altair_chart(chart)
 
             table_rows = []
-            best_rank = all_scenarios[0].get("rank") if all_scenarios else None
 
             for row in all_scenarios[:12]:
-                is_best = row.get("rank") == best_rank
-                if is_best:
-                    status = "Best"
-                elif row.get("policy_type") == "current":
-                    status = "Current"
-                else:
-                    status = "Scenario"
                 table_rows.append(
                     [
                         f"${float(row.get('fee_per_day', 0)):.2f}/day",
                         f"{int(row.get('rental_duration', 0))} days",
                         pct(float(row.get("late_probability", 0)) * 100),
-                        f"{float(row.get('expected_late_days', 0)):.2f}",
+                        f"{float(row.get('late_returns_change_pct', 0) or 0):+.2f}%",
                         money(row.get("expected_total_revenue", 0)),
-                        status,
+                        money(row.get("net_value", row.get("expected_total_revenue", 0))),
+                        scenario_status(row),
                     ]
                 )
 
@@ -4616,13 +4786,24 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                     "Fee / Day",
                     "Rental Duration",
                     "Late Prob.",
-                    "Expected Late Days",
-                    "Expected Revenue",
+                    "Late Returns Δ",
+                    "Total Revenue",
+                    "Net Value",
                     "Status",
                 ],
                 table_rows,
-                number_columns={4},
+                number_columns={4, 5},
             )
+
+            if rejected:
+                st.caption(
+                    ("Rejected: " + " · ".join(
+                        f"{('$%.2f' % k[1]) if k[0] != 'rental_duration' else ''}"
+                        f"{'' if k[0] != 'rental_duration' else str(k[2]) + ' days'}"
+                        f" — {reason}"
+                        for k, reason in rejected.items()
+                    )).replace("$", "\\$")
+                )
         else:
             st.markdown(
                 '<div class="empty-state">No scenario result returned by the current backend.</div>',

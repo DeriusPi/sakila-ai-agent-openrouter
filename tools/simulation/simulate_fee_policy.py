@@ -3,6 +3,12 @@ import time
 from db import get_connection
 from tools.ml.predict_late_probability import predict_late_probability
 from tools.ml.predict_expected_late_days import predict_expected_late_days
+from tools.simulation.behavior import (
+    apply_behavior,
+    formula_text,
+    late_day_opportunity_cost,
+    resolve_behavior,
+)
 
 
 _BASELINE_CACHE = {"value": None, "loaded_at": 0.0}
@@ -53,26 +59,82 @@ def _load_baseline():
     return value
 
 
+def _ml_predictions(customer_late_rate, category, rental_duration, rental_rate):
+    probability_result = predict_late_probability(
+        customer_late_rate=customer_late_rate,
+        category=category,
+        rental_duration=rental_duration,
+        rental_rate=rental_rate,
+    )
+    late_days_result = predict_expected_late_days(
+        customer_late_rate=customer_late_rate,
+        category=category,
+        rental_duration=rental_duration,
+        rental_rate=rental_rate,
+    )
+    return probability_result, late_days_result
+
+
+def _evaluate(n0, rental_rate, p0, d0, fee, current_fee, duration,
+              reference_duration, params, cost_per_late_day):
+    behaviour = apply_behavior(
+        p0, d0, fee, current_fee, duration, reference_duration, params,
+    )
+
+    p = behaviour["late_probability"]
+    d = behaviour["expected_late_days"]
+    rentals = n0 * behaviour["demand_factor"]
+
+    rental_revenue = rentals * rental_rate
+    late_returns = rentals * p
+    late_days_total = late_returns * d
+    late_fee_revenue = late_days_total * fee
+    total_revenue = rental_revenue + late_fee_revenue
+    opportunity_cost = late_days_total * cost_per_late_day
+
+    return {
+        "late_probability": p,
+        "expected_late_days": d,
+        "demand_factor": behaviour["demand_factor"],
+        "expected_rentals": rentals,
+        "expected_late_returns": late_returns,
+        "expected_late_days_total": late_days_total,
+        "expected_rental_revenue": rental_revenue,
+        "expected_late_fee_revenue": late_fee_revenue,
+        "expected_total_revenue": total_revenue,
+        "opportunity_cost": opportunity_cost,
+        "net_value": total_revenue - opportunity_cost,
+    }
+
+
 def simulate_fee_policy(
     customer_late_rate,
     category,
     rental_duration,
     rental_rate,
     fee_per_day,
-    current_fee_per_day=1.00
+    current_fee_per_day=1.00,
+    reference_rental_duration=None,
+    late_fee_elasticity=None,
+    late_days_elasticity=None,
+    demand_fee_elasticity=None,
+    demand_duration_elasticity=None,
 ):
     """
-    Simulate the effect of changing late fee.
+    Simulate a late-fee / rental-duration policy at business level.
 
-    Revenue is evaluated using:
-        expected_rental_revenue
-        + expected_late_fee_revenue
+    NEW behaviour model (see tools/simulation/behavior.py):
+      - a higher fee LOWERS the late-return probability and the number
+        of late days (deterrence), and slightly lowers rental volume;
+      - a shorter rental period slightly lowers rental volume;
+      - policies are evaluated by NET POLICY VALUE =
+        rental revenue + late-fee revenue - opportunity cost of copies
+        kept late (cost per late day measured in the database).
 
-    The demand response is modeled using a mild
-    simulation sensitivity assumption.
-
-    This is a simulation assumption, not an observed
-    causal elasticity.
+    The ML models give the late probability / late days at the CURRENT
+    fee; the elasticities (assumptions, adjustable) translate them to the
+    proposed fee. reference_rental_duration is the current rental period
+    (defaults to rental_duration).
     """
 
     try:
@@ -93,8 +155,21 @@ def simulate_fee_policy(
             "current_fee_per_day must be greater than 0"
         )
 
+    params = resolve_behavior(
+        late_fee_elasticity=late_fee_elasticity,
+        late_days_elasticity=late_days_elasticity,
+        demand_fee_elasticity=demand_fee_elasticity,
+        demand_duration_elasticity=demand_duration_elasticity,
+    )
+
+    reference_duration = (
+        float(reference_rental_duration)
+        if reference_rental_duration not in (None, "")
+        else float(rental_duration)
+    )
+
     # ---------------------------------------------------------
-    # 1-2. Observed baseline volume (cached)
+    # 1. Observed baseline volume (cached)
     # ---------------------------------------------------------
 
     baseline = _load_baseline()
@@ -102,225 +177,126 @@ def simulate_fee_policy(
     if baseline["baseline_rentals"] <= 0:
         raise ValueError("No rental data available.")
 
-    # Mild simulation assumption:
-    # higher late fees reduce demand slightly.
-    # This is NOT an observed causal elasticity.
-    sensitivity = 0.10
-
-    baseline_rentals = float(baseline["baseline_rentals"])
+    n0 = float(baseline["baseline_rentals"])
+    cost = late_day_opportunity_cost()
+    c = float(cost["cost_per_late_day"])
 
     # ---------------------------------------------------------
-    # 3. ML predictions
+    # 2. ML predictions at the current fee
     # ---------------------------------------------------------
 
-    probability_result = predict_late_probability(
-        customer_late_rate=customer_late_rate,
-        category=category,
-        rental_duration=rental_duration,
-        rental_rate=rental_rate
+    probability_result, late_days_result = _ml_predictions(
+        customer_late_rate, category, rental_duration, rental_rate,
     )
 
-    late_days_result = predict_expected_late_days(
-        customer_late_rate=customer_late_rate,
-        category=category,
-        rental_duration=rental_duration,
-        rental_rate=rental_rate
+    p0 = float(probability_result["late_probability"])
+    d0 = float(late_days_result["expected_late_days"])
+
+    # ---------------------------------------------------------
+    # 3. Proposed policy vs current policy
+    # ---------------------------------------------------------
+
+    proposed = _evaluate(
+        n0, rental_rate, p0, d0, fee_per_day, current_fee_per_day,
+        rental_duration, reference_duration, params, c,
     )
 
-    late_probability = float(
-        probability_result["late_probability"]
+    if abs(reference_duration - float(rental_duration)) < 1e-9:
+        base_p0, base_d0 = p0, d0
+    else:
+        base_prob, base_days = _ml_predictions(
+            customer_late_rate, category, reference_duration, rental_rate,
+        )
+        base_p0 = float(base_prob["late_probability"])
+        base_d0 = float(base_days["expected_late_days"])
+
+    current = _evaluate(
+        n0, rental_rate, base_p0, base_d0, current_fee_per_day,
+        current_fee_per_day, reference_duration, reference_duration,
+        params, c,
     )
 
-    expected_late_days = float(
-        late_days_result["expected_late_days"]
-    )
+    def change(key):
+        delta = proposed[key] - current[key]
+        pct = delta / current[key] * 100 if current[key] else 0.0
+        return round(delta, 2), round(pct, 2)
 
-    # ---------------------------------------------------------
-    # 4. Demand impact
-    # ---------------------------------------------------------
+    revenue_change, revenue_change_pct = change("expected_total_revenue")
+    net_change, net_change_pct = change("net_value")
+    late_change, late_change_pct = change("expected_late_returns")
 
-    fee_ratio = (
-        fee_per_day /
-        current_fee_per_day
-    )
-
-    demand_factor = fee_ratio ** (-sensitivity)
-
-    expected_rentals = (
-        baseline_rentals *
-        demand_factor
-    )
-
-    rental_change_pct = (
-        demand_factor - 1
-    ) * 100
-
-    # ---------------------------------------------------------
-    # 5. Rental revenue
-    # ---------------------------------------------------------
-
-    expected_rental_revenue = (
-        expected_rentals *
-        rental_rate
-    )
-
-    # ---------------------------------------------------------
-    # 6. Late-fee revenue
-    # ---------------------------------------------------------
-
-    expected_late_fee_revenue = (
-        expected_rentals
-        * late_probability
-        * expected_late_days
-        * fee_per_day
-    )
-
-    # ---------------------------------------------------------
-    # 7. Total revenue
-    # ---------------------------------------------------------
-
-    expected_total_revenue = (
-        expected_rental_revenue
-        + expected_late_fee_revenue
-    )
-
-    # ---------------------------------------------------------
-    # 8. Baseline revenue
-    # ---------------------------------------------------------
-
-    baseline_rental_revenue = (
-        baseline_rentals *
-        rental_rate
-    )
-
-    baseline_late_fee_revenue = (
-        baseline_rentals
-        * late_probability
-        * expected_late_days
-        * current_fee_per_day
-    )
-
-    baseline_total_revenue = (
-        baseline_rental_revenue
-        + baseline_late_fee_revenue
-    )
-
-    # ---------------------------------------------------------
-    # 9. Revenue change
-    # ---------------------------------------------------------
-
-    revenue_change = (
-        expected_total_revenue
-        - baseline_total_revenue
-    )
-
-    revenue_change_pct = (
-        revenue_change /
-        baseline_total_revenue *
-        100
-        if baseline_total_revenue > 0
-        else 0
-    )
-
-    # ---------------------------------------------------------
-    # 10. Return
-    # ---------------------------------------------------------
+    warnings = list(probability_result.get("warnings", []))
 
     return {
-        "fee_per_day": round(
-            float(fee_per_day),
-            2
+        "fee_per_day": round(fee_per_day, 2),
+        "current_fee_per_day": round(current_fee_per_day, 2),
+        "rental_duration": rental_duration,
+        "reference_rental_duration": reference_duration,
+        "rental_rate": round(rental_rate, 2),
+
+        # ML at the current fee
+        "ml_late_probability": round(p0, 4),
+        "ml_expected_late_days": round(d0, 4),
+
+        # after the fee response
+        "late_probability": round(proposed["late_probability"], 4),
+        "late_probability_pct": round(proposed["late_probability"] * 100, 2),
+        "expected_late_days": round(proposed["expected_late_days"], 4),
+        "on_time_rate_pct": round(
+            (1 - proposed["late_probability"]) * 100, 2
         ),
 
-        "current_fee_per_day": round(
-            current_fee_per_day,
-            2
-        ),
-
-        "behavioral_sensitivity": round(
-            sensitivity,
-            6
-        ),
-
-        "late_probability": round(
-            late_probability,
-            4
-        ),
-
-        "late_probability_pct": round(
-            late_probability * 100,
-            2
-        ),
-
-        "expected_late_days": round(
-            expected_late_days,
-            4
-        ),
-
-        "demand_factor": round(
-            demand_factor,
-            4
-        ),
-
-        "expected_rentals": round(
-            expected_rentals,
-            4
-        ),
-
+        "demand_factor": round(proposed["demand_factor"], 4),
+        "expected_rentals": round(proposed["expected_rentals"], 4),
         "rental_change_pct": round(
-            rental_change_pct,
-            2
+            (proposed["demand_factor"] - 1) * 100, 2
+        ),
+        "expected_late_returns": round(proposed["expected_late_returns"], 1),
+        "late_returns_change": late_change,
+        "late_returns_change_pct": late_change_pct,
+        "expected_late_days_total": round(
+            proposed["expected_late_days_total"], 1
         ),
 
         "expected_rental_revenue": round(
-            expected_rental_revenue,
-            2
+            proposed["expected_rental_revenue"], 2
         ),
-
         "expected_late_fee_revenue": round(
-            expected_late_fee_revenue,
-            2
+            proposed["expected_late_fee_revenue"], 2
         ),
-
         "expected_total_revenue": round(
-            expected_total_revenue,
-            2
+            proposed["expected_total_revenue"], 2
         ),
+        "opportunity_cost": round(proposed["opportunity_cost"], 2),
+        "net_value": round(proposed["net_value"], 2),
 
-        "baseline_total_revenue": round(
-            baseline_total_revenue,
-            2
-        ),
+        "baseline_total_revenue": round(current["expected_total_revenue"], 2),
+        "baseline_net_value": round(current["net_value"], 2),
+        "baseline_late_returns": round(current["expected_late_returns"], 1),
+        "revenue_change": revenue_change,
+        "revenue_change_pct": revenue_change_pct,
+        "net_value_change": net_change,
+        "net_value_change_pct": net_change_pct,
 
-        "revenue_change": round(
-            revenue_change,
-            2
-        ),
+        "behavior_assumptions": params,
+        "cost_per_late_day": c,
+        "cost_basis": cost,
+        "formula": formula_text(),
 
-        "revenue_change_pct": round(
-            revenue_change_pct,
-            2
-        ),
-
-        "rental_duration": rental_duration,
-
-        "rental_rate": round(rental_rate, 2),
+        # kept for backward compatibility
+        "behavioral_sensitivity": params["demand_fee_elasticity"],
 
         "inputs_used": probability_result.get("inputs_used"),
-
-        "warnings": (
-            probability_result.get("warnings", [])
-        ),
-
+        "warnings": warnings,
         "scale_note": (
-            "Simulated business-level revenue: the observed number of "
-            "completed rentals (baseline_rentals) is scaled with the "
-            "given customer/category/rate profile. It is a what-if "
-            "estimate, not observed revenue."
+            "Simulated business-level values: the observed number of "
+            "completed rentals is scaled with the given profile. A higher "
+            "fee lowers late returns via assumed elasticities (Sakila has "
+            "no fee variation to estimate them). What-if estimate, not "
+            "observed revenue."
         ),
-
         "data_source": {
-            "rental_observations": int(baseline_rentals),
+            "rental_observations": int(n0),
             "film_observations": baseline["film_observations"],
-        }
+        },
     }
