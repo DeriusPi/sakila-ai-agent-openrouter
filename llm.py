@@ -340,6 +340,22 @@ Store comparison -> get_store_data
 Rental behaviour breakdown -> get_rental_summary
 Films (top films, catalogue) -> get_film_catalog
 Customers (late customers, one customer) -> get_customer_summary
+Revenue by ANY other relationship -> get_revenue_breakdown(dimension=...)
+  actor, rating, length, rental_rate, rental_duration, replacement_cost,
+  special_feature, language, release_year, staff, customer,
+  customer_country, customer_city, customer_active, customer_home_store,
+  store, film, category, month, weekday, hour; add dimension2 for a
+  cross-tab (e.g. rating x category, actor x category) and filters
+  (category, store_id, dates, actor, film, rating, customer_country).
+  e.g. "doanh thu theo diễn viên" -> dimension=actor;
+  "doanh thu theo xếp hạng phim và thể loại" -> dimension=rating,
+  dimension2=category; "khách ở quốc gia nào chi nhiều nhất" ->
+  dimension=customer_country.
+Actor pairs / co-stars / "cặp diễn viên" -> get_actor_pair_revenue
+Never say a relationship "is not supported" before checking these two
+tools. For actor / special_feature / actor-pair results, state that
+groups overlap (a film counts for each actor) and use shared_revenue
+when an additive split is needed.
 Predict late probability -> predict_late_probability
 Predict expected late days -> predict_expected_late_days
 What happens if we change the late fee -> simulate_fee_policy

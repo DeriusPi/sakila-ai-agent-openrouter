@@ -35,6 +35,11 @@ from tools.data.llm_views import (
     get_film_catalog,
     get_rental_summary,
 )
+from tools.data.revenue_relationships import (
+    DIMENSIONS as _BREAKDOWN_DIMENSIONS,
+    get_actor_pair_revenue,
+    get_revenue_breakdown,
+)
 
 
 # ============================================================
@@ -105,6 +110,8 @@ TOOL_FUNCTIONS = {
     "get_rental_summary": get_rental_summary,
     "get_film_catalog": get_film_catalog,
     "get_customer_summary": get_customer_summary,
+    "get_revenue_breakdown": get_revenue_breakdown,
+    "get_actor_pair_revenue": get_actor_pair_revenue,
 
     # Analysis
     "analyze_revenue_structure": analyze_revenue_structure,
@@ -325,6 +332,119 @@ TOOL_DEFINITIONS = [
                 "store_id": _FILTER_PROPERTIES["store_id"],
                 "start_date": _FILTER_PROPERTIES["start_date"],
                 "end_date": _FILTER_PROPERTIES["end_date"],
+            },
+            "required": [],
+        },
+    },
+
+    {
+        "name": "get_revenue_breakdown",
+        "description": (
+            "Revenue by ANY relationship in the database, by one or two "
+            "dimensions: revenue, rental vs late-fee revenue, rentals, "
+            "late-return rate, avg revenue per rental, share of total. "
+            "Use for actors, ratings, film length, rental price, "
+            "replacement cost, special features, staff, customer country/"
+            "city, customers, weekday, hour, films, and cross-tabs such as "
+            "rating x category or actor x category. Actor / special_feature "
+            "groups are NOT additive (a film counts for each actor); "
+            "shared_revenue is the additive actor split."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "enum": sorted(_BREAKDOWN_DIMENSIONS) + ["actor_pair"],
+                    "description": "Main grouping dimension.",
+                },
+                "dimension2": {
+                    "type": "string",
+                    "enum": sorted(_BREAKDOWN_DIMENSIONS),
+                    "description": "Optional second dimension (cross-tab).",
+                },
+                "category": _FILTER_PROPERTIES["category"],
+                "store_id": _FILTER_PROPERTIES["store_id"],
+                "start_date": _FILTER_PROPERTIES["start_date"],
+                "end_date": _FILTER_PROPERTIES["end_date"],
+                "actor": {
+                    "type": "string",
+                    "description": "Optional actor name (contains match).",
+                },
+                "film": {
+                    "type": "string",
+                    "description": "Optional film title (contains match).",
+                },
+                "rating": {
+                    "type": "string",
+                    "description": "Optional MPAA rating: G, PG, PG-13, R, NC-17.",
+                },
+                "customer_country": {
+                    "type": "string",
+                    "description": "Optional customer country (contains match).",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": [
+                        "total_revenue", "rentals", "late_fee_revenue",
+                        "late_rate_pct", "avg_revenue_per_rental",
+                        "shared_revenue", "rental_revenue",
+                        "late_fee_contribution_pct", "label",
+                    ],
+                    "description": "Sort metric. 'label' = natural order "
+                                   "(e.g. weekdays, ratings, hours).",
+                },
+                "order": {
+                    "type": "string",
+                    "enum": ["desc", "asc"],
+                    "description": "desc = top performers, asc = bottom.",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Rows to return (default 15, max 100).",
+                },
+                "min_rentals": {
+                    "type": "integer",
+                    "description": "Hide groups with fewer rentals.",
+                },
+            },
+            "required": ["dimension"],
+        },
+    },
+
+    {
+        "name": "get_actor_pair_revenue",
+        "description": (
+            "Revenue of films that two actors appear in TOGETHER (actor "
+            "pairs / co-stars): shared films, rentals, revenue, late fees, "
+            "late rate, top films. Pair revenues are not additive."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "top_n": {
+                    "type": "integer",
+                    "description": "Pairs to return (default 15, max 100).",
+                },
+                "category": _FILTER_PROPERTIES["category"],
+                "store_id": _FILTER_PROPERTIES["store_id"],
+                "start_date": _FILTER_PROPERTIES["start_date"],
+                "end_date": _FILTER_PROPERTIES["end_date"],
+                "actor": {
+                    "type": "string",
+                    "description": "Only pairs that include this actor.",
+                },
+                "min_shared_films": {
+                    "type": "integer",
+                    "description": "Minimum films together (default 1).",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": [
+                        "total_revenue", "rentals", "late_fee_revenue",
+                        "shared_films", "avg_revenue_per_film",
+                    ],
+                },
             },
             "required": [],
         },

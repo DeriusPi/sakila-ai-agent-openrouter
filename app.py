@@ -1258,11 +1258,13 @@ def _func_has_params(module_name, func_name, *params):
 # (file on GitHub, check that passes only with the fixed version)
 _BACKEND_FILE_CHECKS = [
     ("db.py", lambda: _module_has("db", "_setting")),
-    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label", "hydrate_from_tools", "ANTHROPIC_MAX_TOKENS")),
+    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label", "hydrate_from_tools", "ANTHROPIC_MAX_TOKENS", source_contains="get_actor_pair_revenue")),
     ("tools/tool_definitions.py",
-     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES", source_contains="NET POLICY VALUE")),
+     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES", source_contains="get_revenue_breakdown")),
     ("tools/data/business_metrics.py",
      lambda: _module_has("tools.data.business_metrics", "get_business_kpis", "build_scope_filters")),
+    ("tools/data/revenue_relationships.py",
+     lambda: _module_has("tools.data.revenue_relationships", "get_revenue_breakdown", "get_actor_pair_revenue")),
     ("tools/data/llm_views.py",
      lambda: _module_has("tools.data.llm_views", "get_film_catalog")),
     ("tools/data/get_category_data.py",

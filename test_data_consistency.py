@@ -22,6 +22,10 @@ from tools.data.get_customer_data import get_customer_data
 from tools.data.get_revenue_by_time import get_revenue_by_time
 from tools.data.get_store_data import get_store_data
 from tools.data.llm_views import get_rental_summary
+from tools.data.revenue_relationships import (
+    get_actor_pair_revenue,
+    get_revenue_breakdown,
+)
 from tools.ml.predict_late_probability import predict_late_probability
 from tools.simulation.compare_scenarios import compare_scenarios
 from tools.simulation.simulate_fee_policy import simulate_fee_policy
@@ -143,6 +147,23 @@ def main():
           min(totals) > 1000 and any(
               x["policy_type"] == "rental_duration" for x in sc["all_scenarios"]
           ))
+
+    for dim in ("category", "rating", "store", "staff", "customer_country",
+                "length", "rental_rate", "weekday"):
+        b = get_revenue_breakdown(dim, top_n=100)
+        check(f"revenue by {dim} sums to total",
+              close(b["sum_of_group_revenue"], EXPECTED["total_revenue"]))
+
+    a = get_revenue_breakdown("actor", top_n=5)
+    check("actor shared revenue + films without actors = total",
+          close(a["sum_of_shared_revenue"]
+                + a["revenue_of_films_without_actors"],
+                EXPECTED["total_revenue"])
+          and not a["additive"])
+
+    pairs = get_actor_pair_revenue(top_n=5)
+    check("actor pairs returned", pairs["pair_count"] > 1000
+          and pairs["rows"][0]["shared_films"] >= 1)
 
     low = simulate_fee_policy(0.512, "All", 5, 2.98, 1.00, 1.00)
     high = simulate_fee_policy(0.512, "All", 5, 2.98, 1.50, 1.00)
