@@ -64,11 +64,19 @@ if "scenario_result" not in st.session_state:
 if "pred_category" not in st.session_state:
     st.session_state.pred_category = "Sci-Fi"
 
+# Defaults = observed Sakila behaviour (overall late rate 51.20%,
+# typical 5-day rental) instead of an arbitrary 28.5% / 3 days.
 if "pred_late_rate" not in st.session_state:
-    st.session_state.pred_late_rate = 28.5
+    st.session_state.pred_late_rate = 51.2
 
 if "pred_duration" not in st.session_state:
-    st.session_state.pred_duration = 3
+    st.session_state.pred_duration = 5
+
+if "prediction_inputs" not in st.session_state:
+    st.session_state.prediction_inputs = None
+
+if "prediction_error" not in st.session_state:
+    st.session_state.prediction_error = None
 
 if "pred_rental_rate" not in st.session_state:
     st.session_state.pred_rental_rate = 2.99
@@ -504,11 +512,51 @@ url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&fam
     .metric-value {
         margin-top: 7px;
         font-family: "JetBrains Mono", monospace;
-        font-size: 25px;
-        line-height: 1;
+        /* FIX: long money values ("$76,048.59") used to break over two
+           lines in narrow cards - shrink instead of wrapping. */
+        font-size: clamp(17px, 1.65vw, 25px);
+        line-height: 1.1;
         font-weight: 600;
         color: var(--slate-900);
         font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .page-intro {
+        margin: 14px 0 6px 0;
+        padding: 14px 18px;
+        background: var(--primary-50);
+        border: 1px solid var(--primary-100);
+        border-left: 4px solid var(--primary);
+        border-radius: 8px;
+    }
+
+    .page-intro-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--primary);
+        margin-bottom: 4px;
+    }
+
+    .page-intro-text {
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--slate-700, #334155);
+    }
+
+    .page-intro-note {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--slate-500, #64748B);
+    }
+
+    .run-context {
+        margin-bottom: 10px;
+        font-size: 12px;
+        color: var(--slate-500, #64748B);
+        font-family: "JetBrains Mono", monospace;
     }
 
     .metric-badge {
@@ -1161,6 +1209,114 @@ def safe_call(func, default=None, *args, **kwargs):
     return result
 
 
+def _module_has(module_name, *names, source_contains=None):
+    import importlib
+
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:  # noqa: BLE001
+        return False
+
+    if any(not hasattr(module, n) for n in names):
+        return False
+
+    if source_contains:
+        import inspect
+
+        try:
+            return source_contains in inspect.getsource(module)
+        except Exception:  # noqa: BLE001
+            return True
+
+    return True
+
+
+def _func_has_params(module_name, func_name, *params):
+    import importlib
+    import inspect
+
+    try:
+        func = getattr(importlib.import_module(module_name), func_name)
+        signature = inspect.signature(func).parameters
+    except Exception:  # noqa: BLE001
+        return False
+
+    return all(p in signature for p in params)
+
+
+# (file on GitHub, check that passes only with the fixed version)
+_BACKEND_FILE_CHECKS = [
+    ("db.py", lambda: _module_has("db", "_setting")),
+    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label")),
+    ("tools/tool_definitions.py",
+     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES")),
+    ("tools/data/business_metrics.py",
+     lambda: _module_has("tools.data.business_metrics", "get_business_kpis", "build_scope_filters")),
+    ("tools/data/llm_views.py",
+     lambda: _module_has("tools.data.llm_views", "get_film_catalog")),
+    ("tools/data/get_category_data.py",
+     lambda: _func_has_params("tools.data.get_category_data", "get_category_data", "store_id", "start_date")),
+    ("tools/data/get_store_data.py",
+     lambda: _func_has_params("tools.data.get_store_data", "get_store_data", "category", "start_date")),
+    ("tools/data/get_revenue_by_time.py",
+     lambda: _module_has("tools.data.get_revenue_by_time", source_contains="late_fee_contribution_pct")),
+    ("tools/ml/_inputs.py",
+     lambda: _module_has("tools.ml._inputs", "normalize_ml_inputs", "load_model")),
+    ("tools/ml/predict_late_probability.py",
+     lambda: _module_has("tools.ml.predict_late_probability", "normalize_ml_inputs")),
+    ("tools/ml/predict_expected_late_days.py",
+     lambda: _module_has("tools.ml.predict_expected_late_days", "normalize_ml_inputs")),
+    ("tools/simulation/simulate_fee_policy.py",
+     lambda: _module_has("tools.simulation.simulate_fee_policy", "_load_baseline")),
+    ("tools/simulation/compare_scenarios.py",
+     lambda: _module_has("tools.simulation.compare_scenarios", "_scenario_row")),
+    ("tools/simulation/simulate_rental_policy.py",
+     lambda: _module_has("tools.simulation.simulate_rental_policy", source_contains="Shorten rental duration")),
+    ("tools/optimization/generate_policy_recommendation.py",
+     lambda: _module_has("tools.optimization.generate_policy_recommendation", source_contains="scale_note")),
+    ("tools/analysis/analyze_late_fee_revenue.py",
+     lambda: _module_has("tools.analysis.analyze_late_fee_revenue", "analyze_late_fee_revenue")),
+    ("tools/analysis/analyze_revenue_drivers.py",
+     lambda: _module_has("tools.analysis.analyze_revenue_drivers", source_contains="on_time")),
+]
+
+
+@st.cache_resource(show_spinner=False)
+def find_outdated_backend_files():
+    """
+    Files on the server that are still the OLD version (or missing).
+    A partially updated repo (e.g. new app.py + old tools/data files)
+    otherwise shows confusing errors such as
+    "unexpected keyword argument 'start_date'".
+    """
+
+    outdated = []
+
+    for path, check in _BACKEND_FILE_CHECKS:
+        try:
+            ok = check()
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            outdated.append(path)
+
+    return outdated
+
+
+def render_outdated_files_warning():
+    outdated = find_outdated_backend_files()
+
+    if not outdated:
+        return
+
+    st.error(
+        "Một số file trên server vẫn là **phiên bản cũ** hoặc bị thiếu, nên "
+        "vài phần của trang có thể báo lỗi. Hãy upload các file sau vào "
+        "**đúng thư mục** trong repo GitHub rồi bấm **Reboot app**:\n\n"
+        + "\n".join(f"- `{path}`" for path in outdated)
+    )
+
+
 def render_data_errors():
     now = _time.time()
     recent = [
@@ -1500,14 +1656,59 @@ def money(value):
 
 def pct(value):
     try:
-        return f"{float(value):.1f}%"
+        return f"{float(value):.2f}%"
     except Exception:
         return "—"
 
 
 
 
-def render_top_header():
+PREDICTIONS_INTRO_HTML = (
+    '<div class="page-intro">'
+    '<div class="page-intro-title">Trang này dùng để làm gì?</div>'
+    '<div class="page-intro-text">'
+    'Nhập hồ sơ một lượt thuê (thể loại phim, tỷ lệ trả trễ lịch sử của '
+    'khách, số ngày thuê, giá thuê, phí trễ/ngày) và bấm '
+    '<b>Run Prediction &amp; Optimize</b>. Hệ thống sẽ '
+    '(1) dự đoán <b>xác suất trả trễ</b> và <b>số ngày trễ</b> bằng mô hình '
+    'ML huấn luyện trên dữ liệu Sakila, (2) <b>mô phỏng doanh thu</b> ở quy '
+    'mô toàn doanh nghiệp (15,861 lượt thuê đã trả), (3) <b>so sánh các '
+    'kịch bản</b> phí trễ và số ngày thuê, rồi (4) <b>đề xuất chính sách</b> '
+    'cho doanh thu kỳ vọng cao nhất trong giới hạn cho phép.'
+    '</div>'
+    '<div class="page-intro-note">'
+    'Kết quả là ước tính what-if theo giả định mô phỏng, không phải doanh '
+    'thu thực tế. Trang này không dùng bộ lọc Film Category / Store / Time '
+    'Period của trang Overview.'
+    '</div>'
+    '</div>'
+)
+
+
+def render_status_badge():
+    st.markdown(
+        f"""
+        <div class="top-header">
+            <div class="system-badge">
+                <span class="status-dot"></span>
+                <span class="mono">
+                    Sakila MySQL · Agent: {html.escape(get_model_label())}
+                </span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_top_header(page="overview"):
+
+    # The Predictions page has its own inputs: the Overview slicers are
+    # not used there, so show a short explanation of the page instead.
+    if page == "predictions":
+        render_status_badge()
+        st.markdown(PREDICTIONS_INTRO_HTML, unsafe_allow_html=True)
+        return
 
     metadata = load_filter_metadata()
 
@@ -3714,18 +3915,33 @@ def render_overview():
 # ============================================================
 
 
+def _observed_late_rate_pct():
+    """Overall observed late-return rate (%) from the database."""
+
+    kpis = load_scope_kpis()
+    try:
+        value = float(kpis.get("late_rate_pct") or 0)
+    except Exception:
+        value = 0.0
+    return value if value > 0 else 51.2
+
+
 def reset_prediction_defaults():
+    """
+    on_click callback: reset the inputs to observed Sakila averages
+    (overall late rate, the category's average rental rate, 5-day
+    rental, current fee). Runs before the widgets are rebuilt, so it
+    may change their session_state values.
+    """
 
     names, rates = load_categories()
 
     if not names:
         names = [""]
 
-    default_category = (
-        "Sci-Fi"
-        if "Sci-Fi" in names
-        else names[0]
-    )
+    category = st.session_state.get("pred_category")
+    if category not in names:
+        category = "Sci-Fi" if "Sci-Fi" in names else names[0]
 
     constraints = load_fee_constraints()
 
@@ -3737,74 +3953,74 @@ def reset_prediction_defaults():
         or 1.00
     )
 
-    st.session_state.pred_category = default_category
-
-    st.session_state.pred_late_rate = 28.5
-
-    st.session_state.pred_duration = 3
-
+    st.session_state.pred_category = category
+    st.session_state.pred_late_rate = round(_observed_late_rate_pct(), 1)
+    st.session_state.pred_duration = 5
     st.session_state.pred_rental_rate = float(
-        rates.get(default_category, 2.99)
+        rates.get(category, 2.99)
         or 2.99
     )
-
     st.session_state.pred_fee = current_fee
 
     st.session_state.prediction_result = None
     st.session_state.policy_result = None
     st.session_state.scenario_result = None
+    st.session_state.prediction_inputs = None
+    st.session_state.prediction_error = None
 
 
+def on_prediction_category_change():
+    """FIX: the rental rate now follows the selected category's average."""
+
+    _names, rates = load_categories()
+    category = st.session_state.get("pred_category")
+
+    if category in rates and rates[category]:
+        st.session_state.pred_rental_rate = float(rates[category])
+
+
+def current_prediction_inputs():
+    return {
+        "category": st.session_state.pred_category,
+        "late_rate_pct": round(float(st.session_state.pred_late_rate), 2),
+        "duration": int(st.session_state.pred_duration),
+        "rental_rate": round(float(st.session_state.pred_rental_rate), 2),
+        "fee": round(float(st.session_state.pred_fee), 2),
+    }
+
+
+def prediction_constraints():
+    constraints = load_fee_constraints()
+
+    return {
+        "current_fee": float(
+            constraints.get("current_fee_per_day", 1.00) or 1.00
+        ),
+        "min_duration": int(constraints.get("min_rental_duration", 3) or 3),
+        "max_duration": int(constraints.get("max_rental_duration", 7) or 7),
+        "lower_fee": constraints.get("lower_bound"),
+        "upper_fee": constraints.get("upper_bound"),
+    }
 
 
 def run_policy_engine():
+    """
+    FIX: every tool is run first and the results are stored together at
+    the end, so a failing tool no longer leaves a mix of new and old
+    results on screen. The inputs used are stored with the results.
+    """
 
-    customer_rate = (
-        float(st.session_state.pred_late_rate)
-        / 100.0
-    )
+    inputs = current_prediction_inputs()
+    limits = prediction_constraints()
 
-    category = st.session_state.pred_category
+    customer_rate = inputs["late_rate_pct"] / 100.0
+    category = inputs["category"]
+    duration = inputs["duration"]
+    rental_rate = inputs["rental_rate"]
+    fee = inputs["fee"]
+    current_fee = limits["current_fee"]
 
-    duration = int(
-        st.session_state.pred_duration
-    )
-
-    rental_rate = float(
-        st.session_state.pred_rental_rate
-    )
-
-    fee = float(
-        st.session_state.pred_fee
-    )
-
-    constraints = load_fee_constraints()
-
-    current_fee = float(
-        constraints.get(
-            "current_fee_per_day",
-            1.00,
-        )
-        or 1.00
-    )
-
-    min_duration = int(
-        constraints.get(
-            "min_rental_duration",
-            3,
-        )
-        or 3
-    )
-
-    max_duration = int(
-        constraints.get(
-            "max_rental_duration",
-            7,
-        )
-        or 7
-    )
-
-    st.session_state.prediction_result = {
+    prediction = {
 
         "probability": predict_late_probability(
             customer_late_rate=customer_rate,
@@ -3830,27 +4046,39 @@ def run_policy_engine():
         ),
     }
 
-    st.session_state.scenario_result = (
-        compare_scenarios(
-            customer_late_rate=customer_rate,
-            category=category,
-            current_rental_duration=duration,
-            rental_rate=rental_rate,
-            current_fee_per_day=current_fee,
-        )
+    scenarios = compare_scenarios(
+        customer_late_rate=customer_rate,
+        category=category,
+        current_rental_duration=duration,
+        rental_rate=rental_rate,
+        current_fee_per_day=current_fee,
     )
 
-    st.session_state.policy_result = (
-        generate_policy_recommendation(
-            customer_late_rate=customer_rate,
-            category=category,
-            current_rental_duration=duration,
-            rental_rate=rental_rate,
-            current_fee_per_day=current_fee,
-            min_rental_duration=min_duration,
-            max_rental_duration=max_duration,
-        )
+    policy = generate_policy_recommendation(
+        customer_late_rate=customer_rate,
+        category=category,
+        current_rental_duration=duration,
+        rental_rate=rental_rate,
+        current_fee_per_day=current_fee,
+        min_rental_duration=limits["min_duration"],
+        max_rental_duration=limits["max_duration"],
     )
+
+    st.session_state.prediction_result = prediction
+    st.session_state.scenario_result = scenarios
+    st.session_state.policy_result = policy
+    st.session_state.prediction_inputs = inputs
+    st.session_state.prediction_error = None
+
+
+def _collect_warnings(*results):
+    warnings = []
+    for result in results:
+        if isinstance(result, dict):
+            for w in result.get("warnings") or []:
+                if w and w not in warnings:
+                    warnings.append(str(w))
+    return warnings
 
 
 
@@ -3863,8 +4091,16 @@ def render_predictions():
     if st.session_state.pred_category not in names:
         st.session_state.pred_category = names[0]
 
+    # First visit: start from observed Sakila averages (DB late rate,
+    # category average rental rate, current fee).
+    if not st.session_state.get("pred_initialized"):
+        reset_prediction_defaults()
+        st.session_state.pred_initialized = True
+
     if st.session_state.pred_category in rates and st.session_state.pred_rental_rate <= 0:
         st.session_state.pred_rental_rate = rates[st.session_state.pred_category]
+
+    limits = prediction_constraints()
 
     render_page_header(
         "Predictions & Policy Optimization Engine",
@@ -3873,22 +4109,22 @@ def render_predictions():
         model_note="Current Sakila late-return models · Calibrated inference",
     )
 
-    spacer, preset_col, reset_col = st.columns([7, 1.35, 1.15])
-    with preset_col:
-        if st.button("Preset Scenarios", key="preset_btn", width="stretch"):
-            st.session_state.pred_late_rate = 28.5
-            st.session_state.pred_duration = 3
-            st.session_state.pred_fee = 1.00
-            st.session_state.pred_rental_rate = float(
-                rates.get(st.session_state.pred_category, 2.99)
-            )
-            st.session_state.prediction_result = None
-            st.session_state.policy_result = None
-            st.session_state.scenario_result = None
-
+    # FIX: "Preset Scenarios" and "Reset Defaults" did almost the same
+    # thing (both set an arbitrary 28.5% late rate) and their labels
+    # wrapped onto two lines. One clear button now resets the inputs to
+    # the observed Sakila averages.
+    _spacer, reset_col = st.columns([5, 2.2])
     with reset_col:
-        if st.button("Reset Defaults", key="reset_btn", width="stretch"):
-            reset_prediction_defaults()
+        st.button(
+            "↺ Reset to Observed Averages",
+            key="reset_btn",
+            width="stretch",
+            on_click=reset_prediction_defaults,
+            help=(
+                "Late rate = overall observed rate, rental rate = category "
+                "average, 5-day rental, current late fee."
+            ),
+        )
 
     left, right = st.columns([4, 8], gap="medium")
 
@@ -3917,23 +4153,29 @@ def render_predictions():
             "Film Category",
             options=names,
             key="pred_category",
+            on_change=on_prediction_category_change,
         )
 
         st.slider(
-            "Customer Historical Late Rate",
+            "Customer Historical Late Rate (%)",
             min_value=0.0,
             max_value=100.0,
-            step=0.5,
+            step=0.1,
             key="pred_late_rate",
+            help=(
+                "Share of this customer's past rentals returned late. "
+                f"Sakila overall: {_observed_late_rate_pct():.2f}%."
+            ),
         )
 
         st.markdown(
             f"""
             <div style="display:flex;justify-content:space-between;margin-top:-8px;margin-bottom:12px;color:#94A3B8;font-family:'JetBrains Mono',monospace;font-size:10px;">
-                <span>0% (Pristine)</span>
+                <span>0%</span>
                 <span>25%</span>
                 <span>50%</span>
-                <span>100% (Chronic)</span>
+                <span>75%</span>
+                <span>100%</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -3943,7 +4185,7 @@ def render_predictions():
 
         dm1, dm2, dm3 = st.columns([1, 2.5, 1])
         with dm1:
-            if st.button("−", key="duration_minus"):
+            if st.button("−", key="duration_minus", width="stretch"):
                 st.session_state.pred_duration = max(
                     1, int(st.session_state.pred_duration) - 1
                 )
@@ -3958,7 +4200,9 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                 unsafe_allow_html=True,
             )
         with dm3:
-            if st.button("+", key="duration_plus"):
+            # FIX: a bare "+" label is parsed as a Markdown list bullet and
+            # rendered as an empty button - escape it.
+            if st.button("\\+", key="duration_plus", width="stretch"):
                 st.session_state.pred_duration = min(
                     14, int(st.session_state.pred_duration) + 1
                 )
@@ -4014,9 +4258,10 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
         upper_text = money(upper_fee) if upper_fee is not None else "DB-derived"
 
         constraints_rows = [
-            ["Min Rental Duration", "3 days"],
-            ["Max Rental Duration", "7 days"],
+            ["Min Rental Duration", f"{limits['min_duration']} days"],
+            ["Max Rental Duration", f"{limits['max_duration']} days"],
             ["Observed Fee Range", f"{lower_text} - {upper_text}/day"],
+            ["Current Late Fee", f"{money(limits['current_fee'])}/day"],
         ]
 
         render_html_table(
@@ -4037,8 +4282,15 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             try:
                 with st.spinner("Running prediction, simulation, and optimization..."):
                     run_policy_engine()
-            except Exception as exc:
-                st.error(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[App] Prediction engine failed: {exc}")
+                st.session_state.prediction_error = str(exc)
+
+        if st.session_state.get("prediction_error"):
+            st.error(
+                "Không chạy được mô hình dự đoán: "
+                f"{st.session_state.prediction_error}"
+            )
 
     with right:
         prediction = st.session_state.prediction_result
@@ -4061,8 +4313,37 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
         probability = prediction["probability"]
         late_days = prediction["late_days"]
         simulation = prediction["simulation"]
+        used = st.session_state.get("prediction_inputs") or current_prediction_inputs()
 
-        c1, c2, c3, c4 = st.columns(4)
+        # FIX: show which inputs these results belong to, and warn when the
+        # inputs were changed after the last run (results used to silently
+        # stay from the previous run, with the fee badge showing the NEW fee).
+        st.markdown(
+            '<div class="run-context">Results for: '
+            f'{html.escape(str(used["category"]))} · late rate '
+            f'{used["late_rate_pct"]:.2f}% · {used["duration"]} days · '
+            f'rate {money(used["rental_rate"])} · fee {money(used["fee"])}/day'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        if used != current_prediction_inputs():
+            st.info(
+                "Thông số đầu vào đã thay đổi sau lần chạy trước. Bấm "
+                "**Run Prediction & Optimize** để cập nhật kết quả."
+            )
+
+        # FIX: ML/simulation warnings (e.g. inputs outside the models'
+        # training range) were returned by the tools but never shown.
+        for warning in _collect_warnings(
+            probability, late_days, simulation, scenarios, policy
+        ):
+            st.caption(f"⚠ {warning}")
+
+        # FIX: 2 x 2 layout - four cards in one row were too narrow and
+        # business-level values ("$76,048.59") wrapped onto two lines.
+        c1, c2 = st.columns(2)
+        c3, c4 = st.columns(2)
 
         with c1:
             render_metric_card(
@@ -4085,15 +4366,20 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             render_metric_card(
                 "EXPECTED LATE-FEE REVENUE",
                 money(simulation.get("expected_late_fee_revenue", 0)),
-                badge=f"Fee {money(st.session_state.pred_fee)}/day",
-                note="Current fee scenario estimate.",
+                badge=f"Fee {money(used['fee'])}/day",
+                note=(
+                    "Simulated for "
+                    f"{float(simulation.get('expected_rentals', 0) or 0):,.0f} "
+                    "rentals (business level)."
+                ),
             )
 
         with c4:
+            change_pct = float(simulation.get("revenue_change_pct", 0) or 0)
             render_metric_card(
                 "EXPECTED TOTAL REVENUE",
                 money(simulation.get("expected_total_revenue", 0)),
-                badge=pct(simulation.get("revenue_change_pct", 0)),
+                badge=f"{change_pct:+.2f}% vs current fee",
                 note="Expected rental revenue plus late-fee revenue.",
             )
 
@@ -4104,6 +4390,15 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             best = policy.get("best_policy") or {}
             reason = policy.get("reason", "")
 
+            # Clearer headline: "3 days" -> "Rental duration: 3 days".
+            best_type = best.get("policy_type")
+            if best_type == "rental_duration" and best.get("rental_duration"):
+                recommendation = f"Rental duration: {int(best['rental_duration'])} days"
+            elif best_type == "fee" and best.get("fee_per_day") is not None:
+                recommendation = f"Late fee: {money(best['fee_per_day'])}/day"
+            elif best_type == "current":
+                recommendation = "Keep the current policy"
+
             st.markdown(
                 f"""
                 <div class="result-panel">
@@ -4113,10 +4408,10 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                     </div>
                     <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-top:14px;">
                         <div>
-                            <div class="policy-value">{recommendation or "No feasible policy"}</div>
+                            <div class="policy-value">{html.escape(str(recommendation or "No feasible policy"))}</div>
                             <div class="policy-reason">{html.escape(str(reason))}</div>
                         </div>
-                        <div class="metric-badge">
+                        <div class="metric-badge" style="white-space:nowrap;">
                             {html.escape(str(len(policy.get("feasible_scenarios", []))))} feasible scenarios
                         </div>
                     </div>
@@ -4154,9 +4449,10 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             a, b = st.columns([1, 2])
             with a:
                 st.button(
-                    "Apply Recommended Policy to POS",
+                    "Apply to POS",
                     disabled=True,
                     width="stretch",
+                    help="Demo only - no POS system is connected.",
                 )
             with b:
                 constraints = policy.get("constraints", {})
@@ -4222,10 +4518,22 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                         legend=alt.Legend(title=None, orient="bottom"),
                     ),
                     tooltip=[
-                        "scenario_label",
-                        "expected_total_revenue",
-                        "late_probability",
-                        "expected_late_days",
+                        alt.Tooltip("scenario_label:N", title="Scenario"),
+                        alt.Tooltip(
+                            "expected_total_revenue:Q",
+                            title="Expected revenue",
+                            format="$,.2f",
+                        ),
+                        alt.Tooltip(
+                            "late_probability:Q",
+                            title="Late probability",
+                            format=".2%",
+                        ),
+                        alt.Tooltip(
+                            "expected_late_days:Q",
+                            title="Expected late days",
+                            format=".2f",
+                        ),
                     ],
                 )
                 .properties(height=260)
@@ -5237,7 +5545,8 @@ if page not in {"overview", "predictions", "analyst"}:
     page = "overview"
 
 activity_placeholder = render_sidebar(page)
-render_top_header()
+render_top_header(page)
+render_outdated_files_warning()
 
 if page == "overview":
     render_overview()
