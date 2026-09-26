@@ -59,7 +59,14 @@ MAX_TOOL_ROUNDS = 8
 MAX_TOOL_RESULT_CHARS = 30000
 MAX_HISTORY_TURNS = 6
 LLM_MAX_RETRIES = 3
-LLM_MAX_TOKENS = 4096
+# FIX: 4096 was too small for answers with a long chart/table (e.g. daily
+# revenue for a whole year) - the JSON got cut off and the app showed
+# "The agent returned no answer". Reasoning models also spend part of
+# this budget on hidden reasoning.
+try:
+    LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "8192"))
+except ValueError:
+    LLM_MAX_TOKENS = 8192
 
 
 def _setting(name, default=None):
@@ -369,6 +376,13 @@ when the user asks for a full breakdown (e.g. all 16 categories).
   chronological order (oldest -> newest), never ranked by value. Use the
   period label from the tool (e.g. "2005-05") as the x value.
 - Categories / stores / scenarios may be ranked from largest to smallest.
+- LONG SERIES (more than 15 points, e.g. daily revenue): do NOT copy the
+  rows. Reference the tool result instead and the app fills in the exact
+  data:
+    {"type": "line", "title": "...", "data_from": "get_revenue_by_time",
+     "data_key": "grouped_revenue", "x_key": "group", "y_key": "revenue"}
+  Tables can do the same with "rows_from" and "data_key" (optionally
+  "columns"). Keep the whole answer short: max 4 KPIs, max 5 insights.
 - For KPI values prefer numbers the tools already return (for example
   late_fee_contribution_pct, revenue_share_pct, late_rate_pct) instead
   of computing your own ratios.
@@ -613,7 +627,42 @@ def serialize_tool_result(result):
 # 8. EXTRACT / NORMALIZE BI RESPONSE
 # ============================================================
 
+BI_KEYS = {"answer", "kpis", "visualizations", "tables", "insights", "summary"}
+
+
+def _is_bi_object(value):
+    return isinstance(value, dict) and bool(BI_KEYS & set(value))
+
+
+def salvage_answer(text):
+    """
+    Pull the "answer" string out of a JSON object that was cut off
+    (max tokens reached), so the user still gets the explanation.
+    """
+
+    if not text:
+        return None
+
+    match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', str(text))
+
+    if not match:
+        return None
+
+    try:
+        return json.loads(f'"{match.group(1)}"')
+    except Exception:  # noqa: BLE001
+        return match.group(1)
+
+
 def extract_json(text):
+    """
+    Returns the BI answer object, or None.
+
+    FIX: when the model's JSON was truncated, the old brace scanner
+    returned the first COMPLETE inner object - e.g. one KPI or one chart
+    row - which has no "answer", so the app showed "The agent returned
+    no answer". Only objects with BI keys are accepted now.
+    """
 
     if not text:
         return None
@@ -624,7 +673,9 @@ def extract_json(text):
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        if _is_bi_object(parsed):
+            return parsed
     except Exception:
         pass
 
@@ -634,7 +685,9 @@ def extract_json(text):
 
     if match:
         try:
-            return json.loads(match.group(1))
+            parsed = json.loads(match.group(1))
+            if _is_bi_object(parsed):
+                return parsed
         except Exception:
             pass
 
@@ -671,7 +724,7 @@ def extract_json(text):
                     candidate = text[start:i + 1]
                     try:
                         parsed = json.loads(candidate)
-                        if isinstance(parsed, dict):
+                        if _is_bi_object(parsed):
                             return parsed
                     except Exception:
                         pass
@@ -817,6 +870,144 @@ def _normalize_insight(insight):
         return None
 
     return str(insight)
+
+
+MAX_HYDRATED_ROWS = 400
+
+
+def _rows_in(result, data_key=None):
+    """List of dict rows inside a tool result (optionally at data_key)."""
+
+    if isinstance(result, list):
+        return [r for r in result if isinstance(r, dict)]
+
+    if not isinstance(result, dict):
+        return []
+
+    if data_key and isinstance(result.get(data_key), list):
+        return [r for r in result[data_key] if isinstance(r, dict)]
+
+    candidates = [
+        [r for r in value if isinstance(r, dict)]
+        for value in result.values()
+        if isinstance(value, list)
+    ]
+    candidates = [c for c in candidates if c]
+
+    return max(candidates, key=len) if candidates else []
+
+
+def _latest_result(tool_outputs, tool_name):
+    wanted = TOOL_ALIASES.get(tool_name, tool_name) if tool_name else None
+
+    for name, result in reversed(tool_outputs):
+        if wanted is None or TOOL_ALIASES.get(name, name) == wanted:
+            return name, result
+
+    return None, None
+
+
+def hydrate_from_tools(data, tool_outputs):
+    """
+    NEW: charts / tables may reference tool data instead of copying it:
+        {"type": "line", "data_from": "get_revenue_by_time",
+         "data_key": "grouped_revenue", "x_key": "group", "y_key": "revenue"}
+    The rows are filled in here from the actual tool result. This keeps
+    the model's answer short (no truncation for long series) and the
+    numbers exact.
+    """
+
+    if not isinstance(data, dict) or not tool_outputs:
+        return data
+
+    for viz in data.get("visualizations") or []:
+        if not isinstance(viz, dict) or viz.get("data"):
+            continue
+        source = viz.get("data_from") or viz.get("source_tool")
+        if not source:
+            continue
+        _name, result = _latest_result(tool_outputs, source)
+        rows = _rows_in(result, viz.get("data_key"))
+        if rows:
+            viz["data"] = rows[:MAX_HYDRATED_ROWS]
+
+    for table in data.get("tables") or []:
+        if not isinstance(table, dict) or table.get("rows"):
+            continue
+        source = table.get("rows_from") or table.get("data_from")
+        if not source:
+            continue
+        _name, result = _latest_result(tool_outputs, source)
+        rows = _rows_in(result, table.get("data_key"))
+        if rows:
+            columns = [
+                c for c in (table.get("columns") or [])
+                if c in rows[0]
+            ] or list(rows[0].keys())
+            table["columns"] = columns
+            table["rows"] = [
+                {c: row.get(c) for c in columns}
+                for row in rows[:MAX_HYDRATED_ROWS]
+            ]
+
+    return data
+
+
+def fallback_from_tools(tool_outputs, note):
+    """
+    Last resort when the model gave no usable answer: show the data of
+    the most recent successful tool call instead of an empty message.
+    """
+
+    for name, result in reversed(tool_outputs):
+        rows = _rows_in(result)
+        if not rows:
+            continue
+
+        keys = list(rows[0].keys())
+        x_key = next(
+            (k for k in keys if isinstance(rows[0][k], str)), keys[0]
+        )
+        preferred = [
+            "revenue", "total_revenue", "late_fee_revenue",
+            "expected_total_revenue", "late_rentals",
+        ]
+        y_key = next(
+            (k for k in preferred if k in rows[0]),
+            next(
+                (
+                    k for k in keys
+                    if k != x_key
+                    and isinstance(rows[0][k], (int, float))
+                    and not isinstance(rows[0][k], bool)
+                ),
+                None,
+            ),
+        )
+
+        visualizations = []
+        if y_key:
+            visualizations.append({
+                "type": "line" if len(rows) > 12 else "bar",
+                "title": f"{name}: {y_key}",
+                "x_key": x_key,
+                "y_key": y_key,
+                "data": rows[:MAX_HYDRATED_ROWS],
+            })
+
+        return {
+            "answer": note,
+            "kpis": [],
+            "visualizations": visualizations,
+            "tables": [{
+                "title": f"Dữ liệu từ {name}",
+                "columns": keys,
+                "rows": rows[:MAX_HYDRATED_ROWS],
+            }],
+            "insights": [],
+        }
+
+    return {"answer": note}
 
 
 def normalize_response(data):
@@ -1078,6 +1269,12 @@ class OpenRouterAdapter:
 
         return response
 
+    def was_truncated(self, response):
+        try:
+            return response.choices[0].finish_reason == "length"
+        except Exception:  # noqa: BLE001
+            return False
+
     def parse(self, response):
         message = response.choices[0].message
         text = message.content or ""
@@ -1178,6 +1375,9 @@ class AnthropicAdapter:
             kwargs["tool_choice"] = {"type": "none"}
 
         return self.client.messages.create(**kwargs)
+
+    def was_truncated(self, response):
+        return getattr(response, "stop_reason", None) == "max_tokens"
 
     def parse(self, response):
         text = "\n".join(
@@ -1373,6 +1573,7 @@ def ask_claude(user_question, activity_callback=None, history=None):
 
     tool_trace = []
     tool_results_for_check = []
+    tool_outputs = []  # (tool_name, result) of successful calls
 
     try:
         adapter = get_adapter()
@@ -1492,6 +1693,7 @@ def ask_claude(user_question, activity_callback=None, history=None):
 
                     if tool_status == "success":
                         tool_results_for_check.append(result)
+                        tool_outputs.append((tool_name, result))
 
                     tool_trace.append({
                         "tool": tool_name,
@@ -1564,6 +1766,28 @@ def ask_claude(user_question, activity_callback=None, history=None):
                     )
                     continue
 
+                # FIX: the tools already produced data - show it instead
+                # of an error / empty card.
+                if tool_outputs:
+                    result = normalize_response(
+                        fallback_from_tools(
+                            tool_outputs,
+                            "Mô hình AI không trả về nội dung (phản hồi rỗng, "
+                            "thường gặp với model miễn phí). Dưới đây là dữ "
+                            "liệu gốc từ tool; bạn có thể hỏi lại để có phần "
+                            "phân tích.",
+                        )
+                    )
+                    result["tool_trace"] = tool_trace
+                    result["model"] = model_used
+                    result["mode"] = mode
+                    emit_activity(
+                        "completed",
+                        status="success",
+                        tool_count=len(tool_trace),
+                    )
+                    return result
+
                 raise LLMError("The model returned an empty response.")
 
             # =================================================
@@ -1606,8 +1830,9 @@ def ask_claude(user_question, activity_callback=None, history=None):
             )
 
             parsed = extract_json(text)
+            truncated = adapter.was_truncated(response)
 
-            if parsed is None and not repaired_json:
+            if (parsed is None or truncated) and not repaired_json:
                 repaired_json = True
 
                 emit_activity(
@@ -1615,31 +1840,84 @@ def ask_claude(user_question, activity_callback=None, history=None):
                     model=model_used,
                     attempt=1,
                     retryable=True,
-                    error="Final answer was not valid JSON - repairing",
+                    error=(
+                        "Final answer was cut off (too long) - asking for "
+                        "a compact answer"
+                        if truncated
+                        else "Final answer was not valid JSON - repairing"
+                    ),
                 )
 
                 adapter.append_text_turn(
                     messages,
-                    text,
-                    "Hãy trả lại ĐÚNG MỘT object JSON hợp lệ theo cấu trúc "
-                    "{answer, kpis, visualizations, tables, insights}, "
-                    "không có markdown, không có chữ ngoài JSON. Giữ nguyên "
-                    "các số liệu từ kết quả tool.",
+                    text[:4000],
+                    (
+                        "Câu trả lời trên bị CẮT vì quá dài. "
+                        if truncated else ""
+                    )
+                    + "Hãy trả lại ĐÚNG MỘT object JSON hợp lệ, NGẮN GỌN, "
+                    "theo cấu trúc {answer, kpis, visualizations, tables, "
+                    "insights}, không markdown, không chữ ngoài JSON. Giữ "
+                    "nguyên số liệu từ tool. Với chuỗi dữ liệu dài KHÔNG "
+                    "chép từng dòng: dùng \"data_from\": \"<tên tool>\" "
+                    "(và \"data_key\") trong visualization, "
+                    "\"rows_from\": \"<tên tool>\" trong table; tối đa "
+                    "4 KPI và 5 insight.",
                 )
 
                 response, model_used = call_llm(
                     adapter, messages, allow_tools=False, on_retry=on_retry
                 )
                 repaired_text, _ = adapter.parse(response)
-                parsed = extract_json(repaired_text)
+                repaired = extract_json(repaired_text)
 
-                if parsed is None and repaired_text.strip():
+                if repaired is not None:
+                    parsed = repaired
+                elif parsed is None and repaired_text.strip():
                     text = repaired_text
 
-            if parsed is None:
-                parsed = {"answer": text}
+            fallback_note = None
 
+            if parsed is None:
+                salvaged = salvage_answer(text)
+                if salvaged:
+                    # Keep the model's explanation and show the tool data
+                    # with it (the charts/tables were lost in the cut).
+                    parsed = fallback_from_tools(tool_outputs, salvaged)
+                elif text.strip().startswith("{"):
+                    # Broken JSON: never show raw JSON as the answer.
+                    parsed = None
+                else:
+                    parsed = {"answer": text}
+
+            if parsed is None:
+                fallback_note = (
+                    "Mô hình AI không trả về được phần diễn giải hoàn chỉnh "
+                    "(câu trả lời quá dài hoặc sai định dạng). Dưới đây là "
+                    "dữ liệu gốc từ tool để bạn tham khảo; hãy thử hỏi hẹp "
+                    "hơn (ví dụ theo tuần/tháng) để có phần phân tích."
+                )
+                parsed = fallback_from_tools(tool_outputs, fallback_note)
+
+            parsed = hydrate_from_tools(parsed, tool_outputs)
             result = normalize_response(parsed)
+
+            # FIX: never end with a completely empty answer card.
+            if not (
+                result["answer"].strip()
+                or result["kpis"]
+                or result["visualizations"]
+                or result["tables"]
+            ):
+                result = normalize_response(
+                    fallback_from_tools(
+                        tool_outputs,
+                        fallback_note or (
+                            "Mô hình AI không trả về nội dung. Dưới đây là "
+                            "dữ liệu gốc từ tool."
+                        ),
+                    )
+                )
             result["tool_trace"] = tool_trace
             result["model"] = model_used
             result["mode"] = mode

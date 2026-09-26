@@ -1249,7 +1249,7 @@ def _func_has_params(module_name, func_name, *params):
 # (file on GitHub, check that passes only with the fixed version)
 _BACKEND_FILE_CHECKS = [
     ("db.py", lambda: _module_has("db", "_setting")),
-    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label")),
+    ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label", "hydrate_from_tools")),
     ("tools/tool_definitions.py",
      lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES", source_contains='Use \\"All\\" for')),
     ("tools/data/business_metrics.py",
@@ -2410,7 +2410,7 @@ def render_agent_visualization(viz):
                     title=x_title,
                     axis=alt.Axis(
                         labelAngle=0 if bar_count <= 8 else -40,
-                        labelOverlap=False,
+                        labelOverlap=bar_count > 20,
                         labelLimit=140,
                     ),
                 ),
@@ -2431,7 +2431,13 @@ def render_agent_visualization(viz):
                     type="nominal",
                     sort=line_sort,
                     title=x_title,
-                    axis=alt.Axis(labelAngle=0, labelOverlap=False),
+                    # FIX: long series (e.g. 40 days) had unreadable,
+                    # overlapping labels - tilt and thin them out.
+                    axis=alt.Axis(
+                        labelAngle=0 if len(df) <= 8 else -45,
+                        labelOverlap=len(df) > 16,
+                        labelLimit=120,
+                    ),
                 ),
                 y=alt.Y(field=y_key, type="quantitative", title=y_title),
                 tooltip=tooltip,
