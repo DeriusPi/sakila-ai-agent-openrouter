@@ -1,4 +1,5 @@
 import html
+import re
 from datetime import datetime
 
 import altair as alt
@@ -1140,14 +1141,24 @@ def safe_call(func, default=None, *args, **kwargs):
     displaying $0 / "—" as if it were real data.
     """
 
+    name = getattr(func, '__name__', 'tool')
+
     try:
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
     except Exception as exc:  # noqa: BLE001
-        message = f"{getattr(func, '__name__', 'tool')}: {exc}"
+        message = f"{name}: {exc}"
         print(f"[App] Data load failed - {message}")
         _db.RECENT_ERRORS.append((_time.time(), message))
         del _db.RECENT_ERRORS[:-20]
         return default
+
+    # FIX: once the tool works again (e.g. MySQL is back), forget its old
+    # errors instead of showing a stale warning for 5 more minutes.
+    _db.RECENT_ERRORS[:] = [
+        (ts, msg) for ts, msg in _db.RECENT_ERRORS
+        if not msg.startswith(f"{name}: ")
+    ]
+    return result
 
 
 def render_data_errors():
@@ -1560,7 +1571,7 @@ def render_top_header():
         if st.button(
             "↻",
             key="header_refresh",
-            use_container_width=True,
+            width="stretch",
             help="Refresh backend data",
         ):
             st.cache_data.clear()
@@ -1593,7 +1604,7 @@ def render_sidebar(page):
     if st.sidebar.button(
         "▦  Overview",
         key="nav_overview",
-        use_container_width=True,
+        width="stretch",
         type=(
             "primary"
             if page == "overview"
@@ -1607,7 +1618,7 @@ def render_sidebar(page):
     if st.sidebar.button(
         "↗  Predictions & Policy",
         key="nav_predictions",
-        use_container_width=True,
+        width="stretch",
         type=(
             "primary"
             if page == "predictions"
@@ -1626,7 +1637,7 @@ def render_sidebar(page):
     if st.sidebar.button(
         "✦  AI Analyst",
         key="nav_analyst",
-        use_container_width=True,
+        width="stretch",
         type=(
             "primary"
             if page == "analyst"
@@ -1845,6 +1856,88 @@ def _to_float_or_none(value):
     return None
 
 
+_MONTH_NAMES = {
+    name: i + 1
+    for i, names in enumerate([
+        ("jan", "january"), ("feb", "february"), ("mar", "march"),
+        ("apr", "april"), ("may",), ("jun", "june"), ("jul", "july"),
+        ("aug", "august"), ("sep", "sept", "september"), ("oct", "october"),
+        ("nov", "november"), ("dec", "december"),
+    ])
+    for name in names
+}
+
+
+def _time_sort_key(value):
+    """
+    Returns a sortable (year, month, day) tuple when the label looks like a
+    period ("2005-07", "2005-07-15", "07/2005", "Tháng 7/2005", "Jul 2005",
+    "2005-Q3", "2005-W28", "2005"), otherwise None.
+    """
+
+    text = str(value).strip().lower()
+    if not text:
+        return None
+
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[ t].*)?", text)
+    if m:
+        return (int(m[1]), int(m[2]), int(m[3]))
+
+    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})", text)
+    if m:
+        return (int(m[1]), int(m[2]), 0)
+
+    m = re.fullmatch(r"(\d{4})-?w(\d{1,2})", text)
+    if m:
+        return (int(m[1]), 0, int(m[2]))
+
+    m = re.fullmatch(r"(\d{4})[- ]?q([1-4])|q([1-4])[- /]?(\d{4})", text)
+    if m:
+        year = int(m[1] or m[4])
+        quarter = int(m[2] or m[3])
+        return (year, quarter * 3 - 2, 0)
+
+    m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", text)
+    if m:
+        return (int(m[3]), int(m[2]), int(m[1]))
+
+    m = re.fullmatch(r"(?:tháng|thang|t|month|m)?\s*(\d{1,2})\s*[-/.,]?\s*(?:năm|nam)?\s*(\d{4})", text)
+    if m and 1 <= int(m[1]) <= 12:
+        return (int(m[2]), int(m[1]), 0)
+
+    m = re.fullmatch(r"([a-z]+)\.?[\s,-]*(\d{4})", text)
+    if m and m[1] in _MONTH_NAMES:
+        return (int(m[2]), _MONTH_NAMES[m[1]], 0)
+
+    m = re.fullmatch(r"(\d{4})[\s,-]*([a-z]+)\.?", text)
+    if m and m[2] in _MONTH_NAMES:
+        return (int(m[1]), _MONTH_NAMES[m[2]], 0)
+
+    if re.fullmatch(r"(19|20)\d{2}", text):
+        return (int(text), 0, 0)
+
+    m = re.fullmatch(r"(?:tháng|thang|month)\s*(\d{1,2})", text)
+    if m and 1 <= int(m[1]) <= 12:
+        return (0, int(m[1]), 0)
+
+    if text in _MONTH_NAMES:
+        return (0, _MONTH_NAMES[text], 0)
+
+    return None
+
+
+def _chronological_order(values):
+    """Ordered list of x labels if every label is a period, else None."""
+
+    unique = list(dict.fromkeys(str(v) for v in values))
+    keys = {v: _time_sort_key(v) for v in unique}
+
+    if not unique or any(k is None for k in keys.values()):
+        return None
+
+    return sorted(unique, key=lambda v: keys[v])
+
+
 def render_agent_kpis(kpis):
     # FIX: the model sometimes returns KPI strings instead of objects,
     # which crashed the page with AttributeError.
@@ -1941,7 +2034,7 @@ def render_agent_visualization(viz):
     )
 
     if y_key is None or x_key not in df.columns:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         return
 
     df[y_key] = df[y_key].map(_to_float_or_none)
@@ -1954,6 +2047,22 @@ def render_agent_visualization(viz):
 
     x_title = x_label or None
     y_title = y_label or None
+
+    # FIX: time periods (months, dates, quarters...) must be shown in
+    # chronological order, not ranked by value. Categories keep the
+    # largest-first ranking.
+    time_order = _chronological_order(df[x_key])
+    if time_order is not None:
+        position = {v: i for i, v in enumerate(time_order)}
+        df = df.assign(_order=df[x_key].map(position)).sort_values(
+            "_order", kind="stable"
+        ).drop(columns="_order")
+        bar_sort = time_order
+        line_sort = time_order
+    else:
+        bar_sort = "-y"
+        line_sort = None
+
     tooltip = [
         alt.Tooltip(field=x_key, type="nominal"),
         alt.Tooltip(field=y_key, type="quantitative", format=",.2f"),
@@ -1968,7 +2077,7 @@ def render_agent_visualization(viz):
                 x=alt.X(
                     field=x_key,
                     type="nominal",
-                    sort="-y",
+                    sort=bar_sort,
                     title=x_title,
                     axis=alt.Axis(
                         labelAngle=0 if bar_count <= 8 else -40,
@@ -1981,7 +2090,7 @@ def render_agent_visualization(viz):
             )
             .properties(height=300)
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart)
 
     elif chart_type == "line":
         chart = (
@@ -1991,7 +2100,7 @@ def render_agent_visualization(viz):
                 x=alt.X(
                     field=x_key,
                     type="nominal",
-                    sort=None,
+                    sort=line_sort,
                     title=x_title,
                     axis=alt.Axis(labelAngle=0, labelOverlap=False),
                 ),
@@ -2000,7 +2109,7 @@ def render_agent_visualization(viz):
             )
             .properties(height=260)
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart)
 
     elif chart_type == "pie":
         chart = (
@@ -2018,10 +2127,10 @@ def render_agent_visualization(viz):
             )
             .properties(height=260)
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart)
 
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
 
 def render_agent_table(table):
@@ -2050,6 +2159,16 @@ def render_agent_table(table):
     if df.empty:
         return
 
+    # FIX: a table whose first column is a time period (months, dates...)
+    # is shown in chronological order.
+    first_col = df.columns[0]
+    time_order = _chronological_order(df[first_col].astype(str))
+    if time_order is not None:
+        position = {v: i for i, v in enumerate(time_order)}
+        df = df.assign(_order=df[first_col].astype(str).map(position)).sort_values(
+            "_order", kind="stable"
+        ).drop(columns="_order")
+
     st.markdown(
         f"""
         <div style="margin-top:14px;">
@@ -2058,7 +2177,7 @@ def render_agent_table(table):
         """,
         unsafe_allow_html=True,
     )
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
 
 def render_agent_insights(insights):
@@ -2846,7 +2965,7 @@ def render_overview():
         if st.button(
             "✦ Open AI Analyst",
             key="overview_ai_analyst",
-            use_container_width=True,
+            width="stretch",
         ):
 
             st.session_state.page = (
@@ -2997,10 +3116,7 @@ def render_overview():
                 )
             )
 
-            st.altair_chart(
-                chart,
-                use_container_width=True,
-            )
+            st.altair_chart(chart)
 
             st.markdown(
                 '<div class="card-subtitle">'
@@ -3589,7 +3705,7 @@ def render_predictions():
 
     spacer, preset_col, reset_col = st.columns([7, 1.35, 1.15])
     with preset_col:
-        if st.button("Preset Scenarios", key="preset_btn", use_container_width=True):
+        if st.button("Preset Scenarios", key="preset_btn", width="stretch"):
             st.session_state.pred_late_rate = 28.5
             st.session_state.pred_duration = 3
             st.session_state.pred_fee = 1.00
@@ -3601,7 +3717,7 @@ def render_predictions():
             st.session_state.scenario_result = None
 
     with reset_col:
-        if st.button("Reset Defaults", key="reset_btn", use_container_width=True):
+        if st.button("Reset Defaults", key="reset_btn", width="stretch"):
             reset_prediction_defaults()
 
     left, right = st.columns([4, 8], gap="medium")
@@ -3744,7 +3860,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
             "Run Prediction & Optimize",
             key="run_prediction",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
         if run:
@@ -3870,7 +3986,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                 st.button(
                     "Apply Recommended Policy to POS",
                     disabled=True,
-                    use_container_width=True,
+                    width="stretch",
                 )
             with b:
                 constraints = policy.get("constraints", {})
@@ -3945,7 +4061,7 @@ Mono',monospace;font-size:13px;font-weight:500;color:#0F172A;">
                 .properties(height=260)
             )
 
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart)
 
             table_rows = []
             best_rank = all_scenarios[0].get("rank") if all_scenarios else None
@@ -4000,7 +4116,7 @@ def prompt_button(label, question, icon):
         clicked = st.button(
             label,
             key=f"prompt_{icon}_{label}",
-            use_container_width=True,
+            width="stretch",
         )
         if clicked:
             st.session_state.pending_question = question
@@ -4761,7 +4877,7 @@ def render_ai_analyst(activity_placeholder=None):
         if st.button(
             "⌂  Home",
             key="ai_home_button",
-            use_container_width=True,
+            width="stretch",
         ):
 
             st.session_state.page = (
@@ -4779,7 +4895,7 @@ def render_ai_analyst(activity_placeholder=None):
         if st.button(
             "✦  AI Agent",
             key="ai_agent_button",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         ):
 
@@ -4842,7 +4958,7 @@ def render_ai_analyst(activity_placeholder=None):
             if st.button(
                 label,
                 key=key,
-                use_container_width=True,
+                width="stretch",
             ):
 
                 st.session_state.pending_question = (
