@@ -8,11 +8,87 @@ scenario, which propagated into the simulation and optimisation tools.
 """
 
 import os
+import time
 from functools import lru_cache
 
 import joblib
 
-from tools.data.business_metrics import normalize_category
+from tools.data.business_metrics import SAKILA_CATEGORIES, normalize_category
+
+
+# "All categories" profile: the prediction is the average over the 16
+# categories, weighted by each category's share of completed rentals.
+ALL_CATEGORIES = "All"
+
+_ALL_CATEGORY_ALIASES = {
+    "all", "all categories", "all film categories", "overall", "any",
+    "*", "tat ca", "tất cả", "tổng quan", "tong quan",
+    "tất cả thể loại", "tat ca the loai",
+}
+
+_WEIGHT_TTL_SECONDS = 600
+_weight_cache = {"at": 0.0, "weights": None}
+
+
+def is_all_categories(category):
+    return (
+        category is None
+        or str(category).strip() == ""
+        or str(category).strip().lower() in _ALL_CATEGORY_ALIASES
+    )
+
+
+def category_weights():
+    """
+    {category: share of completed rentals} from the database, cached for
+    10 minutes. Falls back to equal weights if the database is not
+    reachable.
+    """
+
+    now = time.time()
+    if (
+        _weight_cache["weights"]
+        and now - _weight_cache["at"] < _WEIGHT_TTL_SECONDS
+    ):
+        return dict(_weight_cache["weights"])
+
+    weights = None
+
+    try:
+        from db import get_connection
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT c.name, COUNT(*)
+                    FROM rental r
+                    JOIN inventory i ON r.inventory_id = i.inventory_id
+                    JOIN film_category fc ON i.film_id = fc.film_id
+                    JOIN category c ON fc.category_id = c.category_id
+                    WHERE r.return_date IS NOT NULL
+                    GROUP BY c.name
+                    """
+                )
+                rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        total = sum(int(n) for _, n in rows)
+        if total:
+            weights = {str(name): int(n) / total for name, n in rows}
+    except Exception:  # noqa: BLE001
+        weights = None
+
+    if not weights:
+        weights = {
+            name: 1 / len(SAKILA_CATEGORIES) for name in SAKILA_CATEGORIES
+        }
+
+    _weight_cache.update(at=now, weights=weights)
+
+    return dict(weights)
 
 
 PROJECT_ROOT = os.path.dirname(
@@ -76,7 +152,12 @@ def normalize_ml_inputs(
         )
 
     # ---------------- category ----------------
-    clean_category = normalize_category(category, required=True)
+    # "All" (or no category) = whole catalogue, handled by the predict
+    # functions as a rental-weighted average over the 16 categories.
+    if is_all_categories(category):
+        clean_category = ALL_CATEGORIES
+    else:
+        clean_category = normalize_category(category, required=True)
 
     # ---------------- rental_duration ----------------
     try:

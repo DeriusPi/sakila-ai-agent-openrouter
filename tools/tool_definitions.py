@@ -166,7 +166,11 @@ _PROFILE_PROPERTIES = {
     },
     "category": {
         "type": "string",
-        "description": f"Film category. One of: {_CATEGORY_NAMES}.",
+        "description": (
+            f"Film category. One of: {_CATEGORY_NAMES}. Use \"All\" for "
+            "the whole catalogue (rental-weighted average over all "
+            "categories) when the user does not name a category."
+        ),
     },
     "rental_rate": {
         "type": "number",

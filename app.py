@@ -61,8 +61,10 @@ if "policy_result" not in st.session_state:
 if "scenario_result" not in st.session_state:
     st.session_state.scenario_result = None
 
+PRED_ALL_CATEGORIES = "All Film Categories"
+
 if "pred_category" not in st.session_state:
-    st.session_state.pred_category = "Sci-Fi"
+    st.session_state.pred_category = PRED_ALL_CATEGORIES
 
 # Defaults = observed Sakila behaviour (overall late rate 51.20%,
 # typical 5-day rental) instead of an arbitrary 28.5% / 3 days.
@@ -1249,7 +1251,7 @@ _BACKEND_FILE_CHECKS = [
     ("db.py", lambda: _module_has("db", "_setting")),
     ("llm.py", lambda: _module_has("llm", "_is_derived_from", "get_model_label")),
     ("tools/tool_definitions.py",
-     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES")),
+     lambda: _module_has("tools.tool_definitions", "validate_tool_registry", "TOOL_ALIASES", source_contains='Use \\"All\\" for')),
     ("tools/data/business_metrics.py",
      lambda: _module_has("tools.data.business_metrics", "get_business_kpis", "build_scope_filters")),
     ("tools/data/llm_views.py",
@@ -1261,11 +1263,11 @@ _BACKEND_FILE_CHECKS = [
     ("tools/data/get_revenue_by_time.py",
      lambda: _module_has("tools.data.get_revenue_by_time", source_contains="late_fee_contribution_pct")),
     ("tools/ml/_inputs.py",
-     lambda: _module_has("tools.ml._inputs", "normalize_ml_inputs", "load_model")),
+     lambda: _module_has("tools.ml._inputs", "normalize_ml_inputs", "load_model", "category_weights")),
     ("tools/ml/predict_late_probability.py",
-     lambda: _module_has("tools.ml.predict_late_probability", "normalize_ml_inputs")),
+     lambda: _module_has("tools.ml.predict_late_probability", "normalize_ml_inputs", "category_weights")),
     ("tools/ml/predict_expected_late_days.py",
-     lambda: _module_has("tools.ml.predict_expected_late_days", "normalize_ml_inputs")),
+     lambda: _module_has("tools.ml.predict_expected_late_days", "normalize_ml_inputs", "category_weights")),
     ("tools/simulation/simulate_fee_policy.py",
      lambda: _module_has("tools.simulation.simulate_fee_policy", "_load_baseline")),
     ("tools/simulation/compare_scenarios.py",
@@ -1667,8 +1669,9 @@ PREDICTIONS_INTRO_HTML = (
     '<div class="page-intro">'
     '<div class="page-intro-title">Trang này dùng để làm gì?</div>'
     '<div class="page-intro-text">'
-    'Nhập hồ sơ một lượt thuê (thể loại phim, tỷ lệ trả trễ lịch sử của '
-    'khách, số ngày thuê, giá thuê, phí trễ/ngày) và bấm '
+    'Nhập hồ sơ một lượt thuê (thể loại phim – hoặc <b>All Film '
+    'Categories</b> để xem tổng quan toàn bộ danh mục, tỷ lệ trả trễ lịch '
+    'sử của khách, số ngày thuê, giá thuê, phí trễ/ngày) và bấm '
     '<b>Run Prediction &amp; Optimize</b>. Hệ thống sẽ '
     '(1) dự đoán <b>xác suất trả trễ</b> và <b>số ngày trễ</b> bằng mô hình '
     'ML huấn luyện trên dữ liệu Sakila, (2) <b>mô phỏng doanh thu</b> ở quy '
@@ -3926,6 +3929,44 @@ def _observed_late_rate_pct():
     return value if value > 0 else 51.2
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_prediction_category_options():
+    """
+    Category options for the Predictions page, with an overview option
+    first ("All Film Categories" = whole catalogue, rental-weighted) and
+    the default rental rate for each option (overall = film-weighted
+    average rental rate).
+    """
+
+    result = safe_call(analyze_average_rental_rate_by_category, {})
+    rows = result.get("categories", []) if isinstance(result, dict) else []
+
+    rates = {}
+    films = 0
+    weighted = 0.0
+
+    for row in rows:
+        name = row.get("category")
+        if not name:
+            continue
+        rate = float(row.get("average_rental_rate") or 0)
+        count = int(row.get("film_count") or 0)
+        rates[name] = rate
+        films += count
+        weighted += rate * count
+
+    names = sorted(rates) or [
+        "Action", "Animation", "Children", "Classics", "Comedy",
+        "Documentary", "Drama", "Family", "Foreign", "Games", "Horror",
+        "Music", "New", "Sci-Fi", "Sports", "Travel",
+    ]
+
+    overall = round(weighted / films, 2) if films else 2.98
+    rates[PRED_ALL_CATEGORIES] = overall
+
+    return [PRED_ALL_CATEGORIES] + names, rates
+
+
 def reset_prediction_defaults():
     """
     on_click callback: reset the inputs to observed Sakila averages
@@ -3934,14 +3975,11 @@ def reset_prediction_defaults():
     may change their session_state values.
     """
 
-    names, rates = load_categories()
-
-    if not names:
-        names = [""]
+    names, rates = load_prediction_category_options()
 
     category = st.session_state.get("pred_category")
     if category not in names:
-        category = "Sci-Fi" if "Sci-Fi" in names else names[0]
+        category = PRED_ALL_CATEGORIES
 
     constraints = load_fee_constraints()
 
@@ -3972,7 +4010,7 @@ def reset_prediction_defaults():
 def on_prediction_category_change():
     """FIX: the rental rate now follows the selected category's average."""
 
-    _names, rates = load_categories()
+    _names, rates = load_prediction_category_options()
     category = st.session_state.get("pred_category")
 
     if category in rates and rates[category]:
@@ -4083,13 +4121,12 @@ def _collect_warnings(*results):
 
 
 def render_predictions():
-    names, rates = load_categories()
-
-    if not names:
-        names = ["Action", "Animation", "Children", "Classics", "Comedy", "Documentary", "Drama", "Family", "Foreign", "Games", "Horror", "Music", "New", "Sci-Fi", "Sports", "Travel"]
+    # FIX / NEW: the first option is an overview of the whole catalogue
+    # ("All Film Categories"), so a category no longer has to be chosen.
+    names, rates = load_prediction_category_options()
 
     if st.session_state.pred_category not in names:
-        st.session_state.pred_category = names[0]
+        st.session_state.pred_category = PRED_ALL_CATEGORIES
 
     # First visit: start from observed Sakila averages (DB late rate,
     # category average rental rate, current fee).
@@ -4154,6 +4191,11 @@ def render_predictions():
             options=names,
             key="pred_category",
             on_change=on_prediction_category_change,
+            help=(
+                "The ML models use the film category as an input. "
+                "'All Film Categories' = overview of the whole catalogue "
+                "(average over the 16 categories, weighted by rentals)."
+            ),
         )
 
         st.slider(

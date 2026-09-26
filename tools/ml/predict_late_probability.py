@@ -1,6 +1,11 @@
 import pandas as pd
 
-from tools.ml._inputs import load_model, normalize_ml_inputs
+from tools.ml._inputs import (
+    ALL_CATEGORIES,
+    category_weights,
+    load_model,
+    normalize_ml_inputs,
+)
 
 
 MODEL_FILE = "late_probability.pkl"
@@ -18,6 +23,10 @@ def predict_late_probability(
     customer_late_rate must be a ratio 0-1 (0.512). Percentages such as
     51.2 are converted automatically; category names are normalised
     ('sports' -> 'Sports').
+
+    category="All" (or None) predicts for the whole catalogue: the
+    probability is averaged over the 16 categories, weighted by each
+    category's share of completed rentals.
     """
 
     inputs, warnings = normalize_ml_inputs(
@@ -29,16 +38,29 @@ def predict_late_probability(
 
     model = load_model(MODEL_FILE)
 
+    if inputs["category"] == ALL_CATEGORIES:
+        weights = category_weights()
+        names = list(weights)
+    else:
+        weights = {inputs["category"]: 1.0}
+        names = [inputs["category"]]
+
     input_data = pd.DataFrame([
         {
             "rental_duration": inputs["rental_duration"],
             "rental_rate": inputs["rental_rate"],
-            "category": inputs["category"],
+            "category": name,
             "customer_late_rate": inputs["customer_late_rate"],
         }
+        for name in names
     ])
 
-    probability = float(model.predict_proba(input_data)[0][1])
+    probabilities = model.predict_proba(input_data)[:, 1]
+    total_weight = sum(weights[name] for name in names)
+    probability = float(
+        sum(float(p) * weights[name] for p, name in zip(probabilities, names))
+        / total_weight
+    )
 
     if probability >= 0.70:
         risk_level = "HIGH"
