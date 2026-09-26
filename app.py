@@ -120,8 +120,21 @@ url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&fam
         background: transparent;
     }
 
-    [data-testid="stToolbar"] {
+    /* Hide only the toolbar actions (Deploy / menu). The toolbar itself must
+       stay visible: in Streamlit >= 1.4x it contains the ">>" button that
+       re-opens a collapsed sidebar. */
+    [data-testid="stToolbarActions"],
+    [data-testid="stAppDeployButton"],
+    [data-testid="stMainMenu"] {
         display: none;
+    }
+
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {
+        display: flex !important;
+        visibility: visible !important;
+        z-index: 1000000;
     }
 
     [data-testid="stSidebar"] {
